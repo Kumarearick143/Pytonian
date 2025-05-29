@@ -1,0 +1,8 @@
+torch>=1.10
+numpy
+gudhi
+matplotlib
+qiskit
+cirq
+strawberryfields
+tqdm

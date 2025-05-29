@@ -1,0 +1,81 @@
+pytron_qft/
+├── __init__.py
+│
+├── core/                        # 🔬 Core QFT abstractions
+│   ├── quantum_field.py         # QuantumField layer
+│   ├── operator_algebra.py      # Operator product algebra, Wick contraction
+│   ├── topological_dynamics.py  # Persistent homology-based flow
+│   ├── tensor_network.py        # Adaptive Tensor Network (AdapTN)
+│   ├── measurement.py           # GeometricMeasurement on manifolds
+│   └── hamiltonian.py           # Learnable Hamiltonians
+│
+├── optim/                       # ⚙️ Quantum-classical optimizers
+│   ├── path_integral.py         # PathIntegralOptimizer
+│   ├── qft_scheduler.py         # Custom temperature schedules / annealing
+│   └── renormalizer.py          # RG-based gradient flow engine
+│
+├── physics/                     # 🌌 Physics tools & DSL
+│   ├── feynman_calculus.py      # Differentiable Feynman path simulator
+│   ├── symmetry_detector.py     # Detect SU(n), U(1), etc.
+│   ├── gauge_fields.py          # Encodings for gauge field models
+│   └── holography.py            # AdS/CFT interface
+│
+├── models/                      # 🧠 Prebuilt models using Pytron components
+│   ├── fieldnet.py              # QFT-based classifier (e.g. FieldNet for MNIST)
+│   ├── qf_resnet.py             # QF-ResNet: quantum-inspired CNN
+│   ├── topogan.py               # GAN with topological loss & AdS space
+│   └── quantum_gpt.py           # QF-based language model
+│
+├── hardware/                    # ⚛️ Quantum hardware bridge
+│   ├── ibmq.py                  # IBM Qiskit connector
+│   ├── google_q.py              # Google Sycamore adapter
+│   ├── photonic.py              # Xanadu/Optical hardware API
+│   └── simulator.py             # Classical sim for dev & debug
+│
+├── data/                        # 📊 Datasets and field encodings
+│   ├── mnist.py                 # QuantumField-MNIST encoder
+│   ├── cifar.py                 # Spectral field loader for CIFAR
+│   └── materials.py             # Atomic/molecular field datasets
+│
+├── training/                    # 🏋️‍♂️ Training loop, callbacks, metrics
+│   ├── trainer.py               # Universal trainer (FieldNet, GAN, etc)
+│   ├── metrics.py               # Entropy, Betti numbers, fidelity
+│   └── callbacks.py             # RG feedback, homology logging
+│
+├── visualization/              # 🧪 Wavefunction and tensor visualizations
+│   ├── wavefunction_plot.py     # ψ evolution visualizer
+│   ├── homology_tracker.py      # Persistent topology monitor
+│   ├── tensor_diagram.py        # Contracted tensor network graph
+│   └── manifold_plot.py         # Measurement manifold surface
+│
+├── utils/                      # 🧰 Utilities and helpers
+│   ├── field_ops.py             # FFT, field reshaping, spectral tools
+│   ├── qmath.py                 # Quantum math (braket, commutators, etc)
+│   ├── log.py                   # Logger with quantum run metadata
+│   └── config.py                # Config manager for experiments
+│
+├── notebooks/                  # 📓 Prototyping / demos
+│   ├── 01_fieldnet_mnist.ipynb
+│   ├── 02_topogan_generation.ipynb
+│   └── 03_qf_gpt_textgen.ipynb
+│
+├── examples/                   # 🧪 Minimal reproducible runs
+│   ├── train_fieldnet.py
+│   ├── train_topogan.py
+│   └── train_quantum_gpt.py
+│
+├── tests/                      # ✅ Unit tests
+│   ├── test_quantum_field.py
+│   ├── test_optimizer.py
+│   └── test_measurement.py
+│
+├── docs/                       # 📚 Developer + theory docs
+│   ├── architecture.md
+│   ├── qft_background.md
+│   ├── theory_summary.pdf
+│   └── usage_guide.md
+│
+├── LICENSE
+├── README.md
+├── pyproject.toml              # Poetry or setup.py
+└── requirements.txt

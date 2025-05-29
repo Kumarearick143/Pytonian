@@ -1,0 +1,5085 @@
+
+
+📁 pytron_qft/core/quantum_field.py
+
+🔮 Purpose
+
+The QuantumField class defines a learnable quantum field operator over discrete classical data. It's designed to:
+
+Encode data into a quantum field representation via spectral (Fourier) methods.
+
+Learn field modes per spatial dimension.
+
+Apply renormalization via learnable cutoffs on mode amplitudes.
+
+
+This module is fundamental to treating input data as evolving quantum fields over time or geometry.
+
+
+---
+
+🧠 Core Concepts
+
+Modes: Learnable parameters representing excitation modes in the field (like momenta in Fourier space).
+
+Cutoff: A threshold to suppress small/irrelevant field fluctuations (renormalization concept).
+
+Spectral evolution: A transformation where input data is projected into frequency space, modulated by learnable physics, and then reprojected into real space.
+
+
+
+---
+
+✅ Code + Explanation
+
+import torch
+import torch.nn as nn
+
+class QuantumField(nn.Module):
+    def __init__(self, field_dims, cutoff=1e-3):
+        """
+        Parameters:
+            field_dims (List[int]): Axes to apply QFT-like transforms on.
+            cutoff (float): Renormalization threshold for mode magnitudes.
+        """
+        super().__init__()
+        self.field_dims = field_dims
+        self.cutoff = nn.Parameter(torch.tensor(cutoff))  # Learnable cutoff threshold
+
+        # Initialize a complex mode vector for each field dimension
+        self.modes = nn.ParameterDict({
+            f'k_{i}': nn.Parameter(torch.randn(dim, dtype=torch.cfloat))
+            for i, dim in enumerate(field_dims)
+        })
+
+    def forward(self, x):
+        """
+        Args:
+            x (torch.Tensor): Input field (e.g., image, signal, etc)
+        Returns:
+            torch.Tensor: Transformed field after spectral evolution
+        """
+        for dim, param in zip(self.field_dims, self.modes.values()):
+            # Apply Fourier transform
+            x = torch.fft.fft(x, dim=dim)
+
+            # Modulate frequencies using learnable modes
+            x = self._apply_mode_filter(x, param, dim)
+
+            # Inverse Fourier transform back to real domain
+            x = torch.fft.ifft(x, dim=dim)
+        return x
+
+    def _apply_mode_filter(self, x, modes, dim):
+        """
+        Applies a learnable spectral filter to the tensor `x` along a given dimension.
+        """
+        shape = x.shape
+        n = shape[dim]
+
+        # Create a full-length filter filled with zeros
+        mode_filter = torch.zeros(n, dtype=torch.cfloat, device=x.device)
+
+        # Fill in the learned mode values (can be shorter than n)
+        mode_filter[:len(modes)] = modes
+
+        # Reshape filter to broadcast across x
+        return x * mode_filter.view(*[1]*dim, n, *[1]*(len(shape)-dim-1))
+
+    def renormalize(self):
+        """
+        Applies a renormalization procedure to remove low-magnitude modes.
+        """
+        for name, param in self.modes.items():
+            magnitude = param.abs()
+            phase = param.angle()
+
+            # Zero-out modes below cutoff threshold
+            magnitude = torch.where(magnitude < self.cutoff,
+                                    torch.zeros_like(magnitude),
+                                    magnitude)
+            
+            # Reconstruct parameter from filtered magnitude and original phase
+            param.data = magnitude * torch.exp(1j * phase)
+
+
+---
+
+🔁 Example Usage
+
+qf = QuantumField(field_dims=[-1, -2], cutoff=1e-3)
+input_image = torch.rand(1, 32, 32)  # e.g., grayscale image
+
+transformed = qf(input_image)
+qf.renormalize()
+
+
+---
+
+🧪 Test Plan (future test_quantum_field.py)
+
+Ensure input/output shape consistency.
+
+Test frequency response to input signal.
+
+Validate that renormalization suppresses small amplitudes.
+
+
+
+
+
+
+📁 pytron_qft/core/operator_algebra.py
+
+🧠 Purpose
+
+This module provides the mathematical backbone for quantum operator algebra, essential to quantum field theory (QFT). It supports:
+
+Operator products (e.g., Hamiltonian evolution).
+
+Wick contraction, which is a core concept in quantum field perturbation theory for simplifying products of operators.
+
+
+It acts as a bridge between physics formalisms (Hamiltonians, unitary evolution, contractions) and neural computation.
+
+
+---
+
+🧮 Key Components
+
+1. OperatorProduct
+
+Encodes:
+
+A learnable Hermitian operator (complex-valued matrix) representing an interaction Hamiltonian.
+
+Unitary time evolution using the exponential of the Hamiltonian:
+
+
+\psi_{\text{out}} = e^{-iHt} \psi
+
+2. WickContraction
+
+Simplified version of a tensor contraction utility to simulate normal ordering and Wick contractions in many-body physics.
+
+
+---
+
+✅ Annotated Code
+
+import torch
+import torch.nn as nn
+
+class OperatorProduct(nn.Module):
+    """
+    Represents a learnable Hermitian operator H and 
+    applies time evolution via exp(-iHt)ψ
+    """
+    def __init__(self, operator_dim):
+        super().__init__()
+        # Two real-valued matrices composing the Hermitian operator
+        self.H_real = nn.Parameter(torch.randn(operator_dim, operator_dim))
+        self.H_imag = nn.Parameter(torch.randn(operator_dim, operator_dim))
+
+    @property
+    def H(self):
+        """
+        Construct a Hermitian operator:
+        H† = H => (H + H†) / 2
+        """
+        H = self.H_real + 1j * self.H_imag
+        return (H + H.conj().T) / 2
+
+    def forward(self, ψ, time=0.1):
+        """
+        Applies time evolution: ψ_out = e^{-iHt} ψ
+        Args:
+            ψ (torch.Tensor): Input state vector (complex)
+            time (float): Evolution time
+        Returns:
+            torch.Tensor: Evolved quantum state
+        """
+        U = torch.matrix_exp(-1j * self.H * time)  # Unitary operator
+        return torch.mm(U, ψ)
+
+
+class WickContraction(nn.Module):
+    """
+    Simplified Wick contraction mechanism.
+    In full QFT: Contracts creation/annihilation operators.
+    """
+    def __init__(self, n_particles):
+        super().__init__()
+        self.n_particles = n_particles
+
+    def forward(self, operators):
+        """
+        Args:
+            operators (torch.Tensor): Stack of operator tensors [batch, dim, dim]
+        Returns:
+            torch.Tensor: Contracted operator (mean for now)
+        """
+        # Placeholder: simulate contraction via averaging
+        return operators.mean(dim=0)
+
+
+---
+
+📚 Physics Background
+
+Hermitian operators (H) model observables or energy (Hamiltonians).
+
+Time evolution is unitary:
+
+
+\psi(t) = U(t)\psi(0),\quad U(t) = e^{-iHt}
+
+
+---
+
+🧪 Example Usage
+
+ψ = torch.randn(16, 1, dtype=torch.cfloat)  # State vector
+op = OperatorProduct(operator_dim=16)
+evolved = op(ψ, time=0.5)
+
+operators = torch.randn(10, 16, 16)
+wick = WickContraction(n_particles=10)
+contracted = wick(operators)
+
+
+---
+
+🔬 Future Improvements
+
+Extend WickContraction with:
+
+Real symbolic normal ordering
+
+TensorNetwork-based contractions
+
+Support for creation/annihilation operator algebra
+
+
+Add support for bosonic/fermionic statistics
+
+Allow parameterized time evolution (time-dependent H)
+
+
+
+---
+
+📌 Summary
+
+Component	Role
+
+OperatorProduct	Encodes learnable Hermitian operators and applies quantum evolution
+WickContraction	Simulates simplification of operator products via contractions
+
+
+
+Here’s a comprehensive breakdown of the pytron_qft/core/topological_dynamics.py module, including explanation, physics motivation, and annotated code.
+
+
+---
+
+📁 topological_dynamics.py
+
+🧠 Purpose
+
+This module models topological dynamics in quantum field simulations by incorporating geometric/topological constraints (like persistent homology) into the evolution of a quantum field ψ.
+
+It fuses:
+
+Traditional Hamiltonian unitary evolution
+
+Topological smoothing using Laplacians (simulating persistent homology effects)
+
+A combined evolution rule based on a form of Euler integration
+
+
+
+---
+
+🧮 Key Concepts
+
+🔷 Topological Flow
+
+Topological structures in data (e.g., holes, cycles, Betti numbers) can be detected and preserved by using ideas from persistent homology. Although direct implementation is complex, this code uses Laplacian diffusion as a proxy.
+
+🔷 Homology Smoothing
+
+Laplacians (graph- or manifold-based) serve as discrete approximations of second derivatives — a technique used in geometry-aware diffusion and smoothing operations.
+
+🔷 Quantum + Topological Update Rule
+
+Field evolution:
+
+\psi_{t+\Delta t} = \psi_t + \Delta t \cdot \left( -iH\psi + \gamma \nabla^2\psi + \beta \mathcal{H}(\psi) \right)
+
+
+---
+
+✅ Annotated Code
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+🔹 Homology Flow Proxy
+
+def cech_homology_flow(psi):
+    """
+    Proxy function for persistent homology flow.
+    Currently uses Laplacian smoothing to simulate topological response.
+    
+    Args:
+        psi (Tensor): Quantum field (batch, H, W)
+    
+    Returns:
+        Tensor: Modified ψ after 'topological' diffusion
+    """
+    laplacian_kernel = torch.tensor(
+        [[0,1,0],[1,-4,1],[0,1,0]], dtype=psi.dtype, device=psi.device
+    ).unsqueeze(0).unsqueeze(0)  # shape: (1,1,3,3)
+    
+    laplacian = F.conv2d(psi.unsqueeze(1), laplacian_kernel, padding=1).squeeze(1)
+    return laplacian
+
+🔹 Main Class: TopologicalDynamics
+
+class TopologicalDynamics(nn.Module):
+    """
+    Evolves the quantum field using:
+    - Optional Hamiltonian
+    - Laplacian diffusion (topological smoothing)
+    - Homology-inspired flow
+    """
+    def __init__(self, gamma=0.1, beta=0.1, hamiltonian=None):
+        super().__init__()
+        self.gamma = gamma  # Controls strength of Laplacian flow
+        self.beta = beta    # Controls strength of topological flow
+        self.hamiltonian = hamiltonian  # Callable, e.g., from operator_algebra.py
+
+    def forward(self, psi, dt=0.01):
+        """
+        Apply a single timestep of combined quantum-topological evolution.
+        
+        Args:
+            psi (Tensor): Field configuration (B, H, W)
+            dt (float): Time step
+        
+        Returns:
+            Tensor: Updated field ψ_{t+dt}
+        """
+        # Hamiltonian evolution
+        unitary = -1j * self.hamiltonian(psi) if self.hamiltonian else 0
+        
+        # Laplacian smoothing (discrete ∇²)
+        laplacian_kernel = torch.tensor(
+            [[0,1,0],[1,-4,1],[0,1,0]], dtype=psi.dtype, device=psi.device
+        ).unsqueeze(0).unsqueeze(0)
+        
+        diffusion = self.gamma * F.conv2d(psi.unsqueeze(1), laplacian_kernel, padding=1).squeeze(1)
+        
+        # Persistent homology-like flow
+        homology_flow = self.beta * cech_homology_flow(psi)
+
+        # Combined derivative
+        dpsi_dt = unitary + diffusion + homology_flow
+
+        # Time integration step (Euler)
+        psi_next = psi + dt * dpsi_dt
+        return psi_next
+
+
+---
+
+🔬 Physics Interpretation
+
+Term	Meaning
+
+-iHψ	Quantum unitary evolution
+∇²ψ	Spatial smoothing, enforces local coherence (e.g., minimal surfaces)
+HomologyFlow(ψ)	Simulated topological influence, akin to preserving holes, cycles in field
+
+
+
+---
+
+🔁 Example Usage
+
+from pytron_qft.core.operator_algebra import OperatorProduct
+from pytron_qft.core.topological_dynamics import TopologicalDynamics
+
+# Setup
+psi = torch.randn(4, 32, 32, dtype=torch.cfloat)  # Batch of 2D quantum fields
+hamiltonian = OperatorProduct(operator_dim=32*32)
+
+# Reshape psi for hamiltonian
+psi_flat = psi.view(4, -1, 1)
+ham_fn = lambda ψ: hamiltonian(ψ.view(4, -1, 1)).view(4, 32, 32)
+
+model = TopologicalDynamics(gamma=0.1, beta=0.05, hamiltonian=ham_fn)
+next_psi = model(psi)
+
+
+---
+
+🔧 Possible Enhancements
+
+Replace Laplacian with graph-based homology Laplacians
+
+Use actual persistent homology (via GUDHI, Ripser, etc.) to guide field flow
+
+Add Betti number loss terms for supervised training
+
+
+
+---
+
+📌 Summary
+
+Component	Description
+
+TopologicalDynamics	Evolves ψ via Hamiltonian + Laplacian + topological flow
+cech_homology_flow()	Approximate persistent homology operator (proxy)
+
+
+
+Here’s a comprehensive explanation and code walk-through for the pytron_qft/core/tensor_network.py module, including its purpose, technical design, and suggested improvements.
+
+
+---
+
+📁 tensor_network.py
+
+🧠 Purpose
+
+This module introduces AdapTN, an adaptive tensor network layer designed to model high-dimensional quantum fields using dynamically learned tensor contractions. It leverages:
+
+Neural mechanisms (like GRUs) to adapt contraction structures.
+
+Lightweight implementations of tensor ring operations for quantum-inspired models.
+
+
+Tensor networks are key in quantum many-body physics for representing entangled states efficiently.
+
+
+---
+
+⚙️ Code Overview
+
+import torch
+import torch.nn as nn
+
+
+---
+
+🔹 tensor_ring_contract(tensor, structure)
+
+def tensor_ring_contract(tensor, structure):
+    """
+    Simplified tensor ring contraction algorithm.
+
+    Args:
+        tensor (torch.Tensor): Input high-rank tensor, e.g., from a field ψ
+        structure (torch.Tensor): Guide vector defining contraction structure
+
+    Returns:
+        torch.Tensor: Contracted lower-rank tensor
+    """
+    # Contraction along the last axis with learned weights
+    contracted = torch.einsum('...i,i->...', tensor, structure[:,0])
+    return contracted
+
+💡 Conceptual Explanation
+
+Simulates the contraction of a tensor ring, a structure where tensors are cyclically contracted.
+
+Uses einsum for high-performance inner-product-like reduction.
+
+structure encodes a learned contraction pattern.
+
+
+🛠 Note
+
+This is a placeholder for more advanced contraction schemes like:
+
+Matrix Product States (MPS)
+
+Tensor Train (TT) decompositions
+
+Tree tensor networks or MERA
+
+
+
+---
+
+🔹 AdapTN(nn.Module)
+
+class AdapTN(nn.Module):
+    """
+    Adaptive Tensor Network module using a GRU to control topology of contraction.
+    """
+    def __init__(self, initial_bond_dim=8):
+        super().__init__()
+        self.bonds = nn.Parameter(torch.ones(initial_bond_dim))  # Learnable bond dimensions
+        self.topology = nn.GRU(initial_bond_dim, 4, batch_first=True)  # GRU to adapt contraction topology
+
+bonds: Learnable tensor that acts as the initial vector (like entanglement bonds).
+
+topology: A GRU maps the current bond configuration to a reduced latent topology that guides the contraction.
+
+
+def contract(self, psi):
+        """
+        Contracts input field tensor using a dynamically learned structure.
+
+        Args:
+            psi (Tensor): Quantum field tensor (e.g., B x H x W x D)
+
+        Returns:
+            Tensor: Contracted representation
+        """
+        bonds_in = self.bonds.unsqueeze(0).unsqueeze(0)  # Shape: (1, 1, bond_dim)
+        new_structure, _ = self.topology(bonds_in)        # Shape: (1, 1, 4)
+        new_structure = new_structure.squeeze(0).squeeze(0)  # (4,)
+        return tensor_ring_contract(psi, new_structure)
+
+
+---
+
+🔁 Usage Example
+
+from pytron_qft.core.tensor_network import AdapTN
+
+psi = torch.randn(2, 16, 16, 8)  # Example field tensor: B x H x W x D
+model = AdapTN(initial_bond_dim=8)
+contracted_psi = model.contract(psi)  # Resulting in shape: (2, 16, 16)
+
+
+---
+
+🔬 Physical Interpretation
+
+Component	Meaning
+
+bonds	Analogous to quantum entanglement bonds between sites
+GRU topology	Encodes dynamic structure of the contraction network
+einsum op	Approximates contraction between high-order tensors
+
+
+
+---
+
+🚀 Potential Improvements
+
+Feature	Description
+
+Real Tensor Networks	Replace proxy einsum with real TT/MPS structures
+Topology Control	Let GRU outputs determine not just weights, but network structure
+Batch Support	Extend contract() to handle batched tensor fields efficiently
+Quantum Initialization	Initialize bonds with physical insight (e.g., entanglement entropy)
+
+
+
+---
+
+🧾 Summary
+
+File	pytron_qft/core/tensor_network.py
+
+Main Class	AdapTN
+Key Function	tensor_ring_contract
+Design	Combines learnable bonds + GRU to contract field tensors
+Use Case	Compressing / embedding quantum fields in physics-aware models
+
+
+
+Here's a full breakdown of the pytron_qft/core/measurement.py file, including its purpose, technical design, and detailed explanation of the code.
+
+
+---
+
+📁 measurement.py
+
+🧠 Purpose
+
+This module defines GeometricMeasurement, a differentiable quantum measurement layer that:
+
+Projects quantum field states onto a curved measurement manifold.
+
+Models measurements with influence from geometric curvature, inspired by differential geometry and quantum gravity (e.g., AdS/CFT).
+
+
+It’s useful for:
+
+Modeling observables with respect to geometric constraints.
+
+Enhancing expressivity of measurements in a quantum field learning context.
+
+
+
+---
+
+⚙️ Code Overview
+
+import torch
+
+The entire logic is implemented using PyTorch and operates on complex-valued tensors (dtype=torch.cfloat).
+
+
+---
+
+🔹 GeometricMeasurement Class
+
+class GeometricMeasurement(torch.nn.Module):
+    def __init__(self, output_dim, curvature=0.1):
+        super().__init__()
+        self.R = nn.Parameter(torch.tensor(curvature))  # Learnable curvature
+        self.projection = nn.Linear(output_dim, output_dim, dtype=torch.cfloat)
+
+💡 Conceptual Explanation
+
+self.R: A learnable scalar that represents geometric curvature of the manifold.
+
+Inspired by Ricci or scalar curvature in Riemannian geometry.
+
+
+self.projection: A complex-valued linear layer to map states ψ to a measurement basis.
+
+This simulates measuring ψ along some non-trivial basis, like eigenstates of a curved observable.
+
+
+
+
+---
+
+🔹 forward() Method
+
+def forward(self, ψ):
+        """Measurement with manifold curvature"""
+        # Project onto measurement basis
+        ψ_proj = self.projection(ψ)
+
+Projects the quantum field state ψ into a new basis using a learnable linear transformation.
+
+ψ_proj is a complex-valued vector representing amplitudes in this new basis.
+
+
+# Compute probabilities with curvature
+        probs = ψ_proj.abs().square()
+
+Standard quantum measurement: probability = |amplitude|².
+
+probs now contains the basic Born-rule probabilities.
+
+
+curved_probs = probs ** (self.R + 1)
+
+Applies curvature bias: raises probabilities to a fractional power influenced by R.
+
+When R > 0, enhances confident predictions.
+
+When R < 0, flattens distribution (more uncertainty).
+
+Inspired by non-Euclidean manifold metrics (e.g., hyperbolic space).
+
+
+
+return curved_probs / curved_probs.sum(dim=-1, keepdim=True)
+
+Normalizes the curved probabilities to ensure they sum to 1 (valid probability distribution).
+
+
+
+---
+
+🧪 Example Usage
+
+from pytron_qft.core.measurement import GeometricMeasurement
+
+ψ = torch.randn(4, 32, dtype=torch.cfloat)  # batch of 4 quantum field states
+meas = GeometricMeasurement(output_dim=32, curvature=0.2)
+
+probs = meas(ψ)  # shape: (4, 32), each row sums to 1
+
+
+---
+
+📐 Geometric Interpretation
+
+Element	Meaning
+
+projection	Basis transformation simulating an observable
+R (curvature)	Controls geometric distortion of outcome probabilities
+curved_probs	Manifold-informed quantum measurement outcome
+
+
+
+---
+
+🔬 Research Context
+
+This module is useful for:
+
+Simulating curved spacetime effects on measurements (e.g., AdS/CFT).
+
+Adding geometric inductive biases to QFT neural networks.
+
+Supporting homological or topological learning objectives.
+
+
+
+---
+
+🛠 Future Improvements
+
+Feature	Suggestion
+
+Manifold projection	Replace linear layer with geometric transformation (e.g., Riemann mapping)
+Multi-modal curvature	Support vector-valued curvature for multiple submanifolds
+Nonlinear observables	Use nonlinear projections (e.g., complex MLPs) for richer measurement dynamics
+
+
+
+---
+
+🧾 Summary
+
+File	pytron_qft/core/measurement.py
+
+Main Class	GeometricMeasurement
+Role	Quantum field measurement on curved manifolds
+Key Feature	Learnable curvature R
+Inspired by	Differential geometry, AdS/QFT
+
+
+
+
+Here's a comprehensive breakdown of the pytron_qft/core/hamiltonian.py module, including design intent, mathematical formulation, code explanation, and its place in the broader Pytron QFT architecture.
+
+
+---
+
+📁 File: pytron_qft/core/hamiltonian.py
+
+🧠 Purpose
+
+The module defines a learnable Hermitian Hamiltonian that acts on quantum field states ψ. It serves as a parameterized generator of dynamics, which can be learned via backpropagation during training.
+
+This is central to modeling:
+
+Time evolution in quantum systems: 
+
+Energy-based QFT models
+
+Variational principles with a learnable energy functional
+
+
+
+---
+
+⚙️ Code Summary
+
+import torch
+import torch.nn as nn
+
+All components use PyTorch for GPU-accelerated computation and automatic differentiation.
+
+
+---
+
+🔹 Class: LearnableHamiltonian
+
+class LearnableHamiltonian(nn.Module):
+    def __init__(self, size):
+        super().__init__()
+        # Hermitian parameterized matrix as Hamiltonian
+        self.H_real = nn.Parameter(torch.randn(size, size))
+        self.H_imag = nn.Parameter(torch.randn(size, size))
+
+✅ Purpose:
+
+Defines a Hamiltonian  as a learnable Hermitian matrix.
+
+H_real and H_imag are real-valued learnable parameters that form the real and imaginary parts of the complex Hamiltonian matrix.
+
+
+
+---
+
+🔸 Hermitian Enforcement
+
+def forward(self, psi):
+        # Construct Hermitian matrix H = A + iB, H = H†
+        H = self.H_real + 1j * self.H_imag
+        H = (H + H.conj().t()) / 2
+        return H @ psi
+
+🔬 Explanation:
+
+The sum H = self.H_real + 1j * self.H_imag creates a complex matrix.
+
+Then it is explicitly Hermitian symmetrized by averaging it with its conjugate transpose:
+
+
+H = \frac{H + H^\dagger}{2}
+
+Eigenvalues of  are real (as required for quantum mechanics).
+
+ can be used to generate unitary evolution .
+
+
+🧮 Output:
+
+Applies , i.e., the matrix-vector multiplication of the Hamiltonian with the field state ψ.
+
+
+
+---
+
+📈 Use Case in Pytron
+
+Component	Use
+
+TopologicalDynamics	Accepts a Hamiltonian callable for evolution.
+OperatorProduct	Could use the Hamiltonian for unitary transforms.
+FieldNet, QF-GPT	Use LearnableHamiltonian for modeling latent dynamics.
+
+
+
+---
+
+🧪 Example Usage
+
+from pytron_qft.core.hamiltonian import LearnableHamiltonian
+
+H = LearnableHamiltonian(size=64)
+psi = torch.randn(64, dtype=torch.cfloat)
+out = H(psi)  # Output: ψ' = Hψ
+
+
+---
+
+🧾 Summary
+
+Element	Description
+
+Class	LearnableHamiltonian
+Purpose	Learnable Hermitian operator for dynamics
+Key Properties	Hermitian symmetry, complex domain
+Output	 – linear transformation
+Learnable Parameters	H_real, H_imag
+Symmetry Enforced	 (Hermitian)
+Use Cases	Unitary evolution, energy models, variational training
+
+
+
+---
+
+📚 Extensions & Suggestions
+
+Feature	Description
+
+Time Evolution	Add e^{-iHt} unitary application (torch.matrix_exp)
+Sparse Hamiltonians	For large systems, use sparse representations
+Multi-scale H	Hierarchical block Hamiltonians for RG modeling
+Coupled Fields	Extend to tensor product structure for entangled fields
+
+
+
+
+Here’s a detailed breakdown of the pytron_qft/optim/path_integral.py module, explaining its concept, design, and full code functionality.
+
+
+---
+
+📁 File: pytron_qft/optim/path_integral.py
+
+🎯 Purpose
+
+Implements a Path Integral Optimizer, inspired by Feynman's path integral formulation of quantum mechanics. Instead of traditional backpropagation, it evolves a population of model copies (paths) and selects updates based on action-weighted averages, mimicking quantum annealing.
+
+This allows:
+
+Optimization over rugged landscapes.
+
+Escape from poor local minima.
+
+Stochastic updates guided by a physical interpretation of energy/action.
+
+
+
+---
+
+🔍 Key Concepts
+
+Concept	Role
+
+Feynman Path Integral	System evolves over all possible paths weighted by action
+Quantum Annealing	Noise-based exploration in parameter space
+Action Functional	Encodes cost/energy (proxy: MSE here)
+Temperature	Controls exploration level (high T = more randomness)
+Beta	Inverse temperature; controls sharpness of softmin weighting
+
+
+
+---
+
+🧠 Code Overview
+
+import copy
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+Uses copy.deepcopy to simulate multiple independent path instances.
+
+Functional loss (F) used to define an action.
+
+
+
+---
+
+🔸 Class: PathIntegralOptimizer
+
+class PathIntegralOptimizer:
+
+🔹 __init__
+
+def __init__(self, model, temp=0.1, n_paths=32, beta=1.0):
+
+model: the nn.Module (e.g., FieldNet) to optimize.
+
+temp: controls noise magnitude (annealing).
+
+n_paths: number of model replicas used for sampling.
+
+beta: how strongly action differences affect weighting.
+
+
+
+---
+
+🔹 Method: feynman_action
+
+def feynman_action(self, pred, target=None):
+
+In physics, this would be:
+
+
+S[\theta] = \int \mathcal{L}(\theta(t), \dot{\theta}(t)) dt
+
+Could be replaced with more complex losses (KL-divergence, topological action, etc.).
+
+
+
+---
+
+🔹 Method: optimize
+
+def optimize(self, data, target=None):
+
+💡 Steps:
+
+1. Clone Paths:
+
+Deep copies of the model simulate alternative quantum histories.
+
+
+
+2. Add Noise (Quantum Exploration):
+
+noise = self.temp * torch.randn_like(param)
+
+
+3. Evaluate Each Path:
+
+action_val = self.feynman_action(output, target)
+
+
+4. Weight Paths by Softmin of Action:
+
+
+
+w_i = \frac{e^{-\beta S_i / T}}{\sum_j e^{-\beta S_j / T}}
+
+5. Update Parameters:
+
+Main model is updated via weighted average of sampled paths:
+
+weighted_params = sum(w * p.data for w, p in zip(weights, param_group))
+
+
+
+
+
+---
+
+🧪 Example Usage
+
+from pytron_qft.models.fieldnet import FieldNet
+from pytron_qft.optim.path_integral import PathIntegralOptimizer
+
+model = FieldNet()
+optimizer = PathIntegralOptimizer(model, temp=0.05, n_paths=16)
+
+for x_batch, y_batch in dataloader:
+    optimizer.optimize(x_batch, y_batch)
+
+
+---
+
+📊 Advantages
+
+Strength	Description
+
+🧭 Global Exploration	Avoids local minima with stochastic sampling
+♾️ Physics-Inspired	More faithful to QFT dynamics (Feynman integral)
+🔄 Derivative-Free	Doesn't rely on backprop (useful for non-differentiable models)
+
+
+
+---
+
+🧰 Extensions & Improvements
+
+Feature	Description
+
+✅ Real Action	Replace MSE with energy functional or field Lagrangian
+🌌 Topological Action	Use Betti numbers / homology change in loss
+🧠 Learnable β, T	Annealing schedules (see qft_scheduler.py)
+🧬 Variational Sampling	Use learned perturbation networks instead of Gaussian noise
+
+
+
+---
+
+🧾 Summary Table
+
+Component	Description
+
+PathIntegralOptimizer	Optimizes model by sampling path-wise parameter perturbations
+feynman_action	Proxy loss function (currently MSE)
+optimize()	Perturb → Evaluate → Weight → Merge
+Key Hyperparams	temp, n_paths, beta
+Output	Updated model with physics-inspired parameter evolution
+
+
+
+Here is a complete and structured breakdown of the qft_scheduler.py module, which defines a custom learning rate scheduler tailored for quantum field theory-inspired training routines, especially those involving annealing techniques.
+
+
+---
+
+📁 File: pytron_qft/optim/qft_scheduler.py
+
+🎯 Purpose
+
+QFTScheduler is a custom annealing-based learning rate scheduler for PyTorch optimizers. It smoothly decays the learning rate from its base value to zero between specified epochs (anneal_start to anneal_end), mimicking temperature annealing in quantum field simulations or path integral optimizers.
+
+
+---
+
+🧠 Code Overview
+
+import torch.optim.lr_scheduler as lr_scheduler
+
+Inherits from PyTorch's _LRScheduler, which allows customization of learning rate behavior across epochs.
+
+
+
+---
+
+🔸 Class: QFTScheduler
+
+class QFTScheduler(lr_scheduler._LRScheduler):
+
+A subclass of _LRScheduler that introduces a linear decay schedule inspired by temperature control in quantum systems.
+
+
+---
+
+🔹 __init__ method
+
+def __init__(self, optimizer, anneal_start=10, anneal_end=100, last_epoch=-1):
+
+Arguments:
+
+Argument	Description
+
+optimizer	A torch.optim.Optimizer instance
+anneal_start	Epoch when annealing begins (factor = 1.0)
+anneal_end	Epoch when annealing ends (factor = 0.0)
+last_epoch	For restoring state (PyTorch compatibility)
+
+
+Behavior:
+
+From anneal_start to anneal_end, the learning rate linearly decreases.
+
+Before anneal_start: learning rate is unchanged.
+
+After anneal_end: learning rate drops to zero.
+
+
+
+---
+
+🔹 get_lr method
+
+def get_lr(self):
+
+This function defines how learning rates evolve per epoch:
+
+if current_epoch < self.anneal_start:
+    factor = 1.0
+elif current_epoch > self.anneal_end:
+    factor = 0.0
+else:
+    factor = 1.0 - (current_epoch - self.anneal_start) / (self.anneal_end - self.anneal_start)
+
+It then scales each base learning rate accordingly:
+
+return [base_lr * factor for base_lr in self.base_lrs]
+
+
+---
+
+📊 Use Case Example
+
+import torch
+import torch.optim as optim
+from pytron_qft.optim.qft_scheduler import QFTScheduler
+
+model = MyQuantumModel()
+optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+scheduler = QFTScheduler(optimizer, anneal_start=5, anneal_end=50)
+
+for epoch in range(100):
+    train_step(model, optimizer)
+    scheduler.step()  # Apply updated learning rate
+
+
+---
+
+💡 When to Use
+
+Use Case	Benefit
+
+Path Integral Optimizer	Gradually reduces temperature to focus sampling on optimal paths
+Quantum Annealing Simulation	Mimics the annealing process (high → low temperature)
+Regularized Training	Prevents late-stage overfitting with vanishing LR
+Curriculum Learning	Allows smooth transition from exploration to convergence
+
+
+
+---
+
+📋 Summary Table
+
+Feature	Description
+
+anneal_start	Epoch to start annealing (LR decay begins)
+anneal_end	Epoch to stop annealing (LR reaches 0)
+get_lr()	Computes linear decay factor from 1 → 0
+Applied To	Optimizer (e.g., Adam, SGD)
+Inspired By	Quantum temperature decay, annealing
+
+
+
+---
+
+🚀 Extension Ideas
+
+Feature	Description
+
+🔁 Cosine Annealing	Use cosine decay instead of linear
+🧠 Learnable Schedule	Make anneal_start/end adaptive during training
+📉 Topological Triggers	Trigger annealing based on topology shifts (e.g., Betti numbers)
+🎯 Parameter-specific decay	Custom decay curves for different layers/params
+
+
+
+Here's a detailed explanation of everything in the renormalizer.py module.
+
+
+---
+
+📁 File: pytron_qft/core/renormalizer.py
+
+🧠 Purpose
+
+This module defines a renormalization-inspired gradient update engine. It mimics renormalization group (RG) flow concepts to update model parameters, smoothing gradients via momentum and filtering out high-frequency (chaotic) updates.
+
+
+---
+
+🔍 Code Breakdown
+
+🔸 Imports
+
+import torch
+import torch.nn as nn
+
+Brings in PyTorch’s tensor and neural network modules.
+
+
+
+---
+
+🔹 Class: Renormalizer
+
+class Renormalizer(nn.Module):
+
+Inherits from nn.Module, though it doesn’t contain trainable parameters itself. It's structured this way to plug into PyTorch pipelines easily.
+
+
+---
+
+🔸 __init__ Method
+
+def __init__(self, learning_rate=1e-3, momentum=0.9):
+
+Arguments:
+
+Argument	Description
+
+learning_rate	Step size for updates (akin to SGD or Adam)
+momentum	Controls smoothing/inertia of gradient flow
+
+
+Internal State:
+
+self.velocity = None
+
+Used to store the exponentially decaying moving average of gradients.
+
+
+---
+
+🔹 forward Method
+
+def forward(self, model, loss):
+
+Arguments:
+
+model: A PyTorch nn.Module to be updated.
+
+loss: Scalar tensor loss (typically the result of forward pass + loss function).
+
+
+
+---
+
+⚙️ Functionality:
+
+1. Backward Pass:
+
+loss.backward()
+
+Computes gradients w.r.t. model parameters.
+
+
+2. Renormalization Flow:
+
+for param in model.parameters():
+    ...
+    self.velocity = self.momentum * self.velocity + self.learning_rate * param.grad
+    param.data -= self.velocity
+    param.grad.zero_()
+
+Applies a momentum-based update:
+
+
+Updates parameter in-place: 
+
+Clears gradient buffer after update (.grad.zero_()).
+
+
+
+
+Returns:
+
+The updated model (in-place modified).
+
+
+
+---
+
+🧠 Intuition
+
+The method is inspired by renormalization group (RG) theory in physics:
+
+RG Concept	ML Analogy
+
+Remove high-frequency fluctuations	Smooth noisy gradients
+Flow to infrared (low energy)	Stabilize toward convergence
+Effective theory at large scales	Optimal weights after learning
+
+
+
+---
+
+✅ Summary Table
+
+Feature	Description
+
+learning_rate	Step size for parameter updates
+momentum	Controls inertia of gradient flow
+velocity	Tracks history of gradient updates
+loss.backward()	Standard PyTorch backpropagation
+param.data -= v	Manual parameter update with smoothing
+Inspired by	Renormalization Group flow (QFT concept)
+
+
+
+---
+
+📦 Example Usage
+
+model = MyQuantumModel()
+renorm = Renormalizer(learning_rate=1e-3, momentum=0.95)
+
+for x, y in dataloader:
+    pred = model(x)
+    loss = my_loss_fn(pred, y)
+    model.zero_grad()
+    model = renorm(model, loss)
+
+
+---
+
+💡 Extensions and Ideas
+
+Extension	Description
+
+🧠 Layer-wise velocity	Maintain per-layer momentum buffers
+🔁 Cosine annealing	Decay learning_rate over time
+⛓ Multi-scale smoothing	Combine local & global parameter flows
+🎯 Integration with PathIntegralOptimizer	Blend stochastic + RG dynamics
+
+
+
+---
+
+🔚 Conclusion
+
+The Renormalizer class offers a lightweight, physics-inspired alternative to traditional optimizers. It’s well-suited to quantum field theory models where RG concepts align naturally with gradient flow and multiscale dynamics.
+
+Here's a full detailed explanation of the feynman_calculus.py file with code:
+
+
+---
+
+📁 File: pytron_qft/core/feynman_calculus.py
+
+
+---
+
+🧠 Purpose
+
+This module defines a simple numerical simulator for quantum wavefunction evolution using a Feynman path integral inspired method. It approximates time evolution via discrete time steps and the Trotter expansion.
+
+
+---
+
+🔍 Code Breakdown
+
+🔸 Imports
+
+import torch
+
+Uses PyTorch for tensor operations and GPU acceleration.
+
+
+
+---
+
+🔹 Class: FeynmanPathSimulator
+
+class FeynmanPathSimulator:
+
+This class simulates wavefunction evolution by repeatedly applying a discretized unitary operator based on the system's Hamiltonian.
+
+
+---
+
+🔸 __init__ Method
+
+def __init__(self, hamiltonian, dt=0.01, n_steps=100):
+
+Arguments:
+
+Argument	Description
+
+hamiltonian	Callable function mapping ψ → Hψ
+dt	Time step size for evolution increments
+n_steps	Number of discrete time steps to simulate
+
+
+Stores these for later use.
+
+
+---
+
+🔹 propagate Method
+
+def propagate(self, psi0):
+
+Arguments:
+
+psi0: initial wavefunction tensor (complex-valued).
+
+
+Returns:
+
+psi_t: wavefunction after evolution through n_steps.
+
+
+
+---
+
+⚙️ Algorithm:
+
+1. Clone initial state to avoid modifying input.
+
+psi_t = psi0.clone()
+
+
+2. Iterate over n_steps time slices:
+
+for _ in range(self.n_steps):
+
+
+3. Apply first-order Trotter approximation of unitary evolution:
+
+
+
+e^{-i H \Delta t} \approx I - i H \Delta t
+
+H_psi = self.hamiltonian(psi_t)
+psi_t = psi_t - 1j * self.dt * H_psi
+
+4. Normalize wavefunction to maintain unit norm:
+
+psi_t = psi_t / psi_t.norm()
+
+
+5. Return final propagated wavefunction after all steps.
+
+
+
+
+---
+
+🧠 Physical and Mathematical Intuition
+
+The Hamiltonian operator  governs the system’s energy and evolution.
+
+The unitary operator  evolves the quantum state over time .
+
+Since computing  exactly is often costly, we use a Trotter expansion approximating this exponential for small time slices.
+
+This corresponds to summing over all possible quantum paths weighted by the action, as in Feynman path integrals.
+
+Normalization ensures the wavefunction stays valid with total probability = 1.
+
+
+
+---
+
+✅ Summary Table
+
+Component	Description
+
+hamiltonian	Callable 
+dt	Time step size
+n_steps	Number of simulation steps
+propagate method	Applies Trotter approximation loop
+psi_t	Wavefunction evolving over time
+
+
+
+---
+
+📦 Example Usage
+
+def hamiltonian(psi):
+    # Example: simple diagonal Hamiltonian acting elementwise
+    H_matrix = torch.diag(torch.tensor([1.0, 2.0, 3.0], dtype=psi.dtype))
+    return H_matrix @ psi
+
+simulator = FeynmanPathSimulator(hamiltonian, dt=0.01, n_steps=500)
+
+psi0 = torch.tensor([1.0, 0.0, 0.0], dtype=torch.cfloat)
+psi_final = simulator.propagate(psi0)
+print(psi_final)
+
+
+---
+
+💡 Possible Extensions
+
+Extension	Description
+
+Higher-order Trotter-Suzuki	More accurate time evolution approximations
+Adaptive time stepping	Dynamically adjust dt for accuracy
+Support for open systems	Include dissipation or noise effects
+GPU acceleration	Leverage CUDA for large wavefunctions
+
+
+
+---
+
+🔚 Conclusion
+
+The FeynmanPathSimulator class provides a straightforward numerical method to simulate quantum wavefunction evolution by discretizing the Feynman path integral. It is a useful primitive in quantum physics simulations and quantum machine learning research.
+
+
+Here's a complete detailed explanation of symmetry_detector.py with the full code and purpose:
+
+
+---
+
+📁 File: pytron_qft/core/symmetry_detector.py
+
+
+---
+
+🧠 Purpose
+
+This module provides a utility class SymmetryDetector for detecting symmetries in operator matrices commonly encountered in quantum physics and quantum field theory (QFT). For example, it can check if a given matrix is unitary, which corresponds to the group U(n).
+
+
+---
+
+🔍 Code Breakdown
+
+🔸 Imports
+
+import torch
+
+Uses PyTorch for tensor and matrix computations.
+
+
+
+---
+
+🔹 Class: SymmetryDetector
+
+class SymmetryDetector:
+
+A class designed to analyze matrix properties to identify symmetry groups such as U(1), SU(n), or general unitary groups U(n).
+
+
+---
+
+🔸 __init__ Method
+
+def __init__(self, threshold=1e-3):
+
+threshold: numerical tolerance for floating-point checks, e.g., how close to identity the matrix product must be to count as unitary.
+
+
+Stores this threshold for later use in symmetry checks.
+
+
+---
+
+🔹 is_unitary Method
+
+def is_unitary(self, matrix):
+
+Checks if the given matrix  is unitary, i.e., satisfies:
+
+U^\dagger U = I
+
+: conjugate transpose of .
+
+: identity matrix of appropriate dimension.
+
+
+
+---
+
+⚙️ Steps in is_unitary:
+
+1. Construct identity matrix  of size equal to last dimension of matrix.
+
+
+2. Compute product  using conjugate transpose.
+
+
+3. Compute deviation from identity using the Frobenius norm.
+
+
+4. Return True if deviation is below threshold, else False.
+
+
+
+I = torch.eye(matrix.size(-1), dtype=matrix.dtype, device=matrix.device)
+unitary_test = matrix.conj().transpose(-2, -1) @ matrix
+deviation = torch.norm(unitary_test - I)
+return deviation < self.threshold
+
+
+---
+
+🔹 detectsymmetry Method
+
+def detectsymmetry(self, matrix):
+
+Attempts to detect common symmetry groups of the matrix.
+
+Currently, only checks if matrix is unitary → returns "U(n)".
+
+Placeholder for extending to more specialized groups like , , etc.
+
+
+Returns either the name of the symmetry group as a string or None if no known symmetry detected.
+
+if self.is_unitary(matrix):
+    return "U(n)"
+return None
+
+
+---
+
+🧠 Physical & Mathematical Intuition
+
+Unitary matrices represent transformations preserving norms, vital for quantum mechanics where evolution operators must be unitary.
+
+Detecting unitary symmetry helps identify if operators conserve probability amplitudes.
+
+Extensions might check for special unitary groups  (unitary with determinant 1), orthogonal groups, or continuous groups like U(1) (phase rotations).
+
+
+
+---
+
+📦 Example Usage
+
+import torch
+from symmetry_detector import SymmetryDetector
+
+detector = SymmetryDetector(threshold=1e-5)
+
+# Example: 2x2 unitary matrix (Hadamard-like)
+U = torch.tensor([[1, 1], [1, -1]], dtype=torch.cfloat) / torch.sqrt(torch.tensor(2.0))
+
+print(detector.is_unitary(U))       # True
+print(detector.detectsymmetry(U))   # "U(n)"
+
+
+---
+
+💡 Possible Extensions
+
+Feature	Description
+
+Check for SU(n) symmetry	Verify if determinant is 1 and matrix unitary
+Detect U(1) phase group	Check if matrix is diagonal unitary with phase entries
+Orthogonal or symplectic groups	Support real orthogonal matrices and symplectic symmetries
+Symmetry verification with tolerance auto-adjustment	Dynamically adjust threshold
+
+
+
+---
+
+🔚 Summary
+
+SymmetryDetector is a simple yet extendable tool to verify key symmetries of operators in quantum systems, starting with unitarity (U(n)) checks. This helps understand the nature of transformations and constraints on quantum fields or operators in the PyTron QFT framework.
+
+
+---
+
+Here's a comprehensive explanation of gauge_fields.py including the full code and details about its functionality:
+
+
+---
+
+📁 File: pytron_qft/core/gauge_fields.py
+
+
+---
+
+🧠 Purpose
+
+This module defines a PyTorch neural network module called GaugeFieldEncoder. It encodes classical input data into a gauge field representation, which is a fundamental object in gauge theories within quantum field theory (QFT).
+
+Gauge fields represent fields associated with gauge symmetries (like SU(2), SU(3), U(1) groups) that describe fundamental forces. This encoder projects classical features into a vector space corresponding to a gauge group representation.
+
+
+---
+
+🔍 Code Breakdown
+
+🔸 Imports
+
+import torch
+import torch.nn as nn
+
+Uses PyTorch for tensor operations and neural network layers.
+
+
+
+---
+
+🔹 Class: GaugeFieldEncoder
+
+class GaugeFieldEncoder(nn.Module):
+
+A simple feed-forward encoder mapping input feature vectors to gauge field vectors.
+
+
+---
+
+🔸 __init__ Method
+
+def __init__(self, input_dim, gauge_group_dim=3):
+
+input_dim: Number of features in the input data.
+
+gauge_group_dim: Dimensionality of the gauge group representation space.
+
+
+For example:
+
+For the SU(2) gauge group, the adjoint representation has dimension 3.
+
+For U(1), dimension is 1.
+
+
+Initializes a single linear layer (nn.Linear) that projects inputs from the input_dim space to gauge_group_dim.
+
+super().__init__()
+self.encoder = nn.Linear(input_dim, gauge_group_dim)
+
+
+---
+
+🔹 forward Method
+
+def forward(self, x):
+
+Defines the forward pass transforming input data tensor into gauge field space:
+
+x: input tensor of shape (batch_size, input_dim)
+
+Returns gauge field representation tensor (batch_size, gauge_group_dim)
+
+
+The output can be interpreted as encoding classical data into the vector components of a gauge field.
+
+return self.encoder(x)
+
+
+---
+
+🧠 Physical Interpretation
+
+Gauge fields correspond to connections in principal bundles in gauge theories.
+
+Encoding data into gauge fields can be a step towards learning gauge-invariant representations or simulating gauge theories.
+
+This module could be used as a building block in larger quantum field or lattice gauge models where gauge degrees of freedom are explicitly modeled.
+
+
+
+---
+
+📦 Example Usage
+
+import torch
+from gauge_fields import GaugeFieldEncoder
+
+encoder = GaugeFieldEncoder(input_dim=10, gauge_group_dim=3)
+
+input_data = torch.randn(5, 10)  # batch of 5 samples, 10 features each
+gauge_field = encoder(input_data)
+
+print(gauge_field.shape)  # torch.Size([5, 3])
+
+
+---
+
+💡 Possible Extensions
+
+Feature	Description
+
+Non-linear layers	Add activation functions and deeper layers
+Gauge group constraints	Impose structure like tracelessness or antisymmetry for SU(n)
+Incorporate equivariance	Use equivariant layers respecting gauge symmetry
+Output field tensors	Map outputs to tensors matching field strength or connection forms
+
+
+
+---
+
+🔚 Summary
+
+GaugeFieldEncoder is a minimal PyTorch module to project classical inputs into a gauge field vector space associated with a given gauge group dimension. This is useful in machine learning models aiming to simulate or learn from gauge theories in physics.
+
+
+Here's a detailed explanation of holography.py along with the full code and its purpose:
+
+
+---
+
+📁 File: pytron_qft/core/holography.py
+
+
+---
+
+🧠 Purpose
+
+This module implements a minimal neural network model simulating the AdS/CFT correspondence, a central idea in theoretical physics and quantum gravity. The AdS/CFT duality relates a gravity theory in a higher-dimensional "bulk" Anti-de Sitter (AdS) spacetime to a Conformal Field Theory (CFT) defined on its lower-dimensional boundary.
+
+The AdSCFTInterface class encodes and decodes latent representations between these two spaces, capturing the holographic mapping concept where information in the bulk is encoded on the boundary.
+
+
+---
+
+🔍 Code Breakdown
+
+🔸 Imports
+
+import torch
+import torch.nn as nn
+
+Utilizes PyTorch for tensor operations and neural network layers.
+
+
+---
+
+🔹 Class: AdSCFTInterface
+
+class AdSCFTInterface(nn.Module):
+
+A neural network module providing two linear mappings:
+
+bulk_to_boundary: maps bulk latent vectors to boundary latent vectors.
+
+boundary_to_bulk: maps boundary latent vectors back to bulk latent vectors.
+
+
+
+---
+
+🔸 Initialization
+
+def __init__(self, bulk_dim=16, boundary_dim=8):
+
+bulk_dim: dimensionality of the bulk AdS latent space (e.g., 16).
+
+boundary_dim: dimensionality of the boundary CFT latent space (e.g., 8).
+
+
+Initializes two fully connected (nn.Linear) layers for encoding and decoding:
+
+self.bulk_to_boundary = nn.Linear(bulk_dim, boundary_dim)
+self.boundary_to_bulk = nn.Linear(boundary_dim, bulk_dim)
+
+
+---
+
+🔹 Encoding Method
+
+def encode(self, bulk_field):
+
+Input: bulk_field tensor of shape (batch_size, bulk_dim)
+
+Output: boundary_field tensor of shape (batch_size, boundary_dim)
+
+
+This projects the bulk representation into the boundary space.
+
+return self.bulk_to_boundary(bulk_field)
+
+
+---
+
+🔹 Decoding Method
+
+def decode(self, boundary_field):
+
+Input: boundary_field tensor of shape (batch_size, boundary_dim)
+
+Output: bulk_field tensor of shape (batch_size, bulk_dim)
+
+
+This reconstructs the bulk latent vector from the boundary representation.
+
+return self.boundary_to_bulk(boundary_field)
+
+
+---
+
+🧠 Physical and ML Interpretation
+
+Bulk space models the higher-dimensional gravitational theory (AdS).
+
+Boundary space models the lower-dimensional quantum field theory (CFT).
+
+The two linear mappings attempt to learn a correspondence or encode/decode scheme between these two dual descriptions.
+
+Could be extended with nonlinearities, attention, or more complex architectures to better capture the AdS/CFT mapping.
+
+
+
+---
+
+📦 Example Usage
+
+import torch
+from holography import AdSCFTInterface
+
+model = AdSCFTInterface(bulk_dim=16, boundary_dim=8)
+
+bulk_sample = torch.randn(4, 16)  # batch of 4 bulk states
+boundary_rep = model.encode(bulk_sample)  # Map to boundary CFT space
+
+bulk_recon = model.decode(boundary_rep)  # Map back to bulk space
+print(boundary_rep.shape)  # torch.Size([4, 8])
+print(bulk_recon.shape)    # torch.Size([4, 16])
+
+
+---
+
+💡 Possible Extensions
+
+Feature	Description
+
+Nonlinear encoder/decoder	Add activation functions or deeper layers
+Regularization	Encourage invertibility or isometry between spaces
+Attention mechanisms	Capture nonlocal holographic correlations
+Geometry-aware layers	Reflect AdS geometry or CFT operator algebra
+
+
+
+---
+
+🔚 Summary
+
+The AdSCFTInterface is a minimal PyTorch module capturing the essence of holography by implementing a simple linear encoder and decoder between bulk AdS and boundary CFT latent spaces. It’s a useful foundational block for modeling or experimenting with holographic dualities in machine learning and quantum physics contexts.
+
+
+Here's a full detailed explanation of fieldnet.py including the complete code and what each part does:
+
+
+---
+
+📁 File: pytron_qft/core/fieldnet.py
+
+
+---
+
+🧠 Purpose
+
+FieldNet is a PyTorch neural network module that models a quantum-inspired pipeline combining:
+
+Quantum field encoding of input data,
+
+Quantum operator evolution (like Hamiltonian time evolution),
+
+Geometric measurement producing output probabilities.
+
+
+It’s designed for tasks where quantum field theory concepts and quantum measurement analogies inspire the architecture.
+
+
+---
+
+🔍 Code Breakdown
+
+🔸 Imports
+
+import torch
+import torch.nn as nn
+from pytron_qft.core import QuantumField, OperatorProduct, GeometricMeasurement
+
+QuantumField: Encodes classical inputs into quantum field states (wavefunctions or field configurations).
+
+OperatorProduct: Applies a learnable operator evolution (e.g., Hamiltonian time evolution) on quantum states.
+
+GeometricMeasurement: Measures the quantum state producing probability-like outputs.
+
+
+
+---
+
+🔹 Class: FieldNet
+
+class FieldNet(nn.Module):
+
+A neural network module combining the above components to perform quantum-inspired forward computation.
+
+
+---
+
+🔸 Initialization
+
+def __init__(self, input_dims, hidden_dim, num_classes):
+
+input_dims: dimensionality of input features to the quantum field encoder.
+
+hidden_dim: dimension of the quantum operator (Hamiltonian/operator matrix size).
+
+num_classes: output dimension (number of classes) for classification tasks.
+
+
+Inside, three key submodules are instantiated:
+
+self.field_encoder = QuantumField(field_dims=input_dims)
+self.evolution = OperatorProduct(operator_dim=hidden_dim)
+self.measurement = GeometricMeasurement(output_dim=num_classes)
+
+
+---
+
+🔹 Forward Pass
+
+def forward(self, x):
+
+Step 1: Quantum Field Encoding
+
+
+ψ = self.field_encoder(x)
+
+Classical input x is encoded into a quantum field state ψ.
+
+Step 2: Quantum Evolution
+
+
+ψ = self.evolution(ψ)
+
+Apply a learnable operator (e.g., Hamiltonian evolution) to the quantum state.
+
+Step 3: Quantum Measurement
+
+
+return self.measurement(ψ)
+
+Project the evolved quantum state to measurement probabilities (e.g., class probabilities).
+
+
+---
+
+🔹 Collapse Method
+
+def collapse(self, output, target):
+
+Simulates quantum measurement collapse by calculating a loss:
+
+probs = output
+return torch.nn.functional.nll_loss(probs.log(), target)
+
+Takes the output probabilities,
+
+Computes negative log-likelihood loss against the target classes,
+
+Represents measurement collapse to classical labels.
+
+
+
+---
+
+🔹 Renormalization Method
+
+def apply_renormalization(self):
+
+A convenience method to apply renormalization to the quantum field encoding:
+
+self.field_encoder.renormalize()
+
+Assuming QuantumField defines a renormalize() method to apply some RG-inspired smoothing or normalization on the quantum state.
+
+
+---
+
+🧠 Summary
+
+FieldNet builds a pipeline combining:
+
+Quantum-inspired encoding,
+
+Operator evolution mimicking quantum dynamics,
+
+Measurement producing classical output probabilities.
+
+
+This structured, modular design suits research bridging quantum physics concepts and machine learning.
+
+
+---
+
+📦 Example Usage
+
+import torch
+from pytron_qft.core.fieldnet import FieldNet
+
+model = FieldNet(input_dims=10, hidden_dim=16, num_classes=3)
+x = torch.randn(5, 10)  # batch of 5 samples with 10 features
+
+output = model(x)  # forward pass producing measurement probabilities
+
+target = torch.tensor([0, 2, 1, 1, 0])
+loss = model.collapse(output, target)  # compute loss
+loss.backward()
+
+
+Here's a complete explanation of qr_renset.py including the full code and detailed breakdown of each component:
+
+
+---
+
+📁 File: qr_renset.py
+
+
+---
+
+🧠 Purpose
+
+This file defines a quantum-inspired residual neural network (QFResNet) that combines:
+
+Quantum field encoding via a custom QuantumField layer,
+
+Classical convolutional blocks arranged in residual (ResNet) style,
+
+Batch normalization and ReLU nonlinearities,
+
+Adaptive average pooling and a final fully connected layer for classification.
+
+
+This architecture integrates quantum field preprocessing with classical CNNs for image or tensor data classification.
+
+
+---
+
+🔍 Code and Explanation
+
+
+---
+
+🔸 Imports
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from ..core.quantum_field import QuantumField
+
+Uses PyTorch neural network modules.
+
+Imports QuantumField from the core module (assumed to encode classical inputs into quantum states).
+
+
+
+---
+
+🔹 Class: QuantumBasicBlock
+
+This class implements a basic residual block inspired by ResNet, but modified to process quantum-field encoded inputs.
+
+class QuantumBasicBlock(nn.Module):
+
+
+---
+
+Initialization
+
+def __init__(self, in_planes, planes, stride=1):
+
+in_planes: number of input channels.
+
+planes: number of output channels.
+
+stride: stride of convolution (controls downsampling).
+
+
+
+---
+
+Within the constructor:
+
+Initialize the quantum field encoder:
+
+
+self.cf = QuantumField(field_dims=[2])
+
+Two 3x3 convolutional layers with batch normalization:
+
+
+self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
+self.bn1 = nn.BatchNorm2d(planes)
+self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=1, padding=1, bias=False)
+self.bn2 = nn.BatchNorm2d(planes)
+
+Define a shortcut connection to match dimensions if needed:
+
+
+self.shortcut = nn.Sequential()
+if stride != 1 or in_planes != planes:
+    self.shortcut = nn.Sequential(
+        nn.Conv2d(in_planes, planes, kernel_size=1, stride=stride, bias=False),
+        nn.BatchNorm2d(planes)
+    )
+
+
+---
+
+Forward Pass
+
+def forward(self, x):
+
+Encode input x via the quantum field encoder cf:
+
+
+out = self.cf(x)
+
+The output out from QuantumField is presumably complex-valued; use only the real part for convolutions:
+
+
+out = self.conv1(out.real.unsqueeze(1))  # Add a channel dim at dim=1
+
+Apply batch norm and ReLU:
+
+
+out = self.bn1(out)
+out = F.relu(out)
+
+Apply second convolution and batch norm:
+
+
+out = self.conv2(out)
+out = self.bn2(out)
+
+Add shortcut residual (also using real part of input, matching dimension):
+
+
+out += self.shortcut(x.real.unsqueeze(1))
+
+Final ReLU activation:
+
+
+out = F.relu(out)
+
+Return processed tensor.
+
+
+
+---
+
+🔹 Class: QFResNet
+
+This is the overall network composed of stacked QuantumBasicBlocks and classification head.
+
+
+---
+
+Initialization
+
+class QFResNet(nn.Module):
+    def __init__(self, num_classes=100):
+        super().__init__()
+        self.layer1 = QuantumBasicBlock(1, 64)
+        self.layer2 = QuantumBasicBlock(64, 128, stride=2)
+        self.layer3 = QuantumBasicBlock(128, 256, stride=2)
+        self.pool = nn.AdaptiveAvgPool2d((1,1))
+        self.fc = nn.Linear(256, num_classes)
+
+Layer 1: Processes single-channel input to 64 channels (stride=1).
+
+Layer 2: Processes 64 to 128 channels, downsamples by stride=2.
+
+Layer 3: Processes 128 to 256 channels, downsamples by stride=2.
+
+Adaptive average pooling reduces spatial dimensions to 1x1.
+
+Final fully connected layer maps 256 features to number of classes.
+
+
+
+---
+
+Forward Pass
+
+def forward(self, x):
+    out = self.layer1(x)
+    out = self.layer2(out)
+    out = self.layer3(out)
+    out = self.pool(out)
+    out = out.view(out.size(0), -1)
+    return self.fc(out)
+
+Pass input through residual layers.
+
+Pool to fixed size.
+
+Flatten and classify.
+
+
+
+---
+
+🧠 Summary
+
+QuantumBasicBlock: Combines quantum field encoding with classical conv layers and residual connections.
+
+QFResNet: A multi-layer residual network using QuantumBasicBlocks and a classifier head.
+
+Input data is encoded by QuantumField, then passed through convolutional ResNet blocks working on the real part of the quantum representation.
+
+This hybrid quantum-classical design aims to leverage quantum-inspired feature extraction within a standard CNN architecture.
+
+
+
+---
+
+📦 Usage Example
+
+import torch
+from qr_renset import QFResNet
+
+model = QFResNet(num_classes=10)
+x = torch.randn(8, 1, 32, 32)  # batch of 8 grayscale images 32x32
+
+output = model(x)
+print(output.shape)  # torch.Size([8, 10])
+
+
+Here’s a complete and detailed explanation of topogan.py including the full code and in-depth description of each component:
+
+
+---
+
+📁 File: topogan.py
+
+
+---
+
+🧠 Purpose
+
+topogan.py defines a topology-aware Generative Adversarial Network (TopoGAN) that integrates topological dynamics into the discriminator network. This helps the discriminator to capture and enforce topological constraints or properties on generated images.
+
+The GAN consists of:
+
+A Generator that maps latent vectors to images,
+
+A Discriminator enhanced by a topological dynamics module to assess image validity,
+
+A wrapping TopoGAN class encapsulating both.
+
+
+
+---
+
+🔍 Full Code
+
+import torch
+import torch.nn as nn
+from ..core.topological_dynamics import TopologicalDynamics
+
+class Generator(nn.Module):
+    def __init__(self, latent_dim=128, output_dim=28*28):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(latent_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, output_dim),
+            nn.Tanh()
+        )
+    
+    def forward(self, z):
+        img = self.fc(z)
+        img = img.view(z.size(0), 1, 28, 28)
+        return img
+
+class Discriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.topo_dyn = TopologicalDynamics()
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 64, 4, 2, 1), nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 128, 4, 2, 1), nn.LeakyReLU(0.2)
+        )
+        self.fc = nn.Linear(128*7*7, 1)
+    
+    def forward(self, img):
+        img = self.topo_dyn(img)
+        feats = self.conv(img)
+        feats = feats.view(img.size(0), -1)
+        validity = self.fc(feats)
+        return validity
+
+class TopoGAN(nn.Module):
+    def __init__(self, latent_dim=128):
+        super().__init__()
+        self.generator = Generator(latent_dim)
+        self.discriminator = Discriminator()
+
+    def forward(self, z):
+        return self.generator(z)
+
+
+---
+
+🧠 Detailed Explanation
+
+
+---
+
+1. Generator
+
+class Generator(nn.Module):
+    def __init__(self, latent_dim=128, output_dim=28*28):
+
+Takes a latent vector of size latent_dim (default 128).
+
+Outputs a flattened image of size 28*28 = 784 (typical MNIST image size).
+
+
+
+---
+
+self.fc = nn.Sequential(
+    nn.Linear(latent_dim, 256),
+    nn.ReLU(),
+    nn.Linear(256, output_dim),
+    nn.Tanh()
+)
+
+Two fully connected layers:
+
+Map latent vector to 256 features, then apply ReLU.
+
+Map 256 features to image dimension (28*28), apply Tanh to output in range [-1,1].
+
+
+
+
+---
+
+def forward(self, z):
+    img = self.fc(z)
+    img = img.view(z.size(0), 1, 28, 28)
+    return img
+
+Forward pass reshapes output into (batch_size, 1, 28, 28) — a grayscale image.
+
+
+
+---
+
+2. Discriminator
+
+class Discriminator(nn.Module):
+
+Classifies images as real or fake.
+
+Integrates a TopologicalDynamics module to transform input images before standard convolutional layers.
+
+
+
+---
+
+self.topo_dyn = TopologicalDynamics()
+
+TopologicalDynamics is assumed to be a module that applies topological transformations or encodes topological features of images.
+
+
+
+---
+
+self.conv = nn.Sequential(
+    nn.Conv2d(1, 64, 4, 2, 1), nn.LeakyReLU(0.2),
+    nn.Conv2d(64, 128, 4, 2, 1), nn.LeakyReLU(0.2)
+)
+
+Two convolutional layers:
+
+First: input 1 channel → 64 channels, 4x4 kernel, stride 2, padding 1.
+
+Second: 64 → 128 channels, similar conv params.
+
+
+Each followed by LeakyReLU with negative slope 0.2.
+
+
+
+---
+
+self.fc = nn.Linear(128*7*7, 1)
+
+Fully connected layer maps flattened features to single scalar — "validity" score.
+
+
+
+---
+
+def forward(self, img):
+    img = self.topo_dyn(img)
+    feats = self.conv(img)
+    feats = feats.view(img.size(0), -1)
+    validity = self.fc(feats)
+    return validity
+
+Forward pass:
+
+Apply topological transformation to input image.
+
+Extract features with CNN.
+
+Flatten features and predict validity score.
+
+
+
+
+---
+
+3. TopoGAN Wrapper
+
+class TopoGAN(nn.Module):
+    def __init__(self, latent_dim=128):
+        super().__init__()
+        self.generator = Generator(latent_dim)
+        self.discriminator = Discriminator()
+
+    def forward(self, z):
+        return self.generator(z)
+
+Combines generator and discriminator.
+
+forward only runs the generator (for inference or training generation step).
+
+Training routines would separately run discriminator with real/fake images.
+
+
+
+---
+
+🔑 Key Ideas and Usage
+
+TopologicalDynamics module enhances discriminator by incorporating topological features, improving GAN's ability to learn meaningful structural properties beyond pixel-level.
+
+Generator produces 28x28 images from latent noise vectors.
+
+Discriminator classifies images with topology-informed features.
+
+Useful in domains where topology or geometric structure matters (e.g., scientific imaging, structured data generation).
+
+
+
+---
+
+🧩 Possible Extensions
+
+Implement training loops for adversarial loss.
+
+Provide TopologicalDynamics definition or import details.
+
+Extend generator with convolutional layers for higher quality images.
+
+Add noise injection or other GAN stabilization techniques.
+
+
+
+Here's a comprehensive explanation and breakdown of quantumgpt.py with the full code and detailed insights:
+
+
+---
+
+📁 File: quantumgpt.py
+
+
+---
+
+🧠 Purpose
+
+quantumgpt.py implements a Quantum-inspired GPT-like Transformer decoder model, blending classical Transformer architecture with a quantum field encoding layer.
+
+The model is designed for sequence modeling (e.g., language modeling, token prediction).
+
+It integrates a QuantumField module to embed input token embeddings into a quantum field representation before decoding.
+
+Uses a standard Transformer decoder stack for autoregressive prediction.
+
+
+
+---
+
+🔍 Full Code
+
+import torch
+import torch.nn as nn
+from torch.nn import TransformerDecoder, TransformerDecoderLayer
+from ..core.quantum_field import QuantumField
+
+class QuantumGPT(nn.Module):
+    def __init__(self, vocab_size, d_model=512, nhead=8, num_layers=6):
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, d_model)
+        self.positional_encoding = nn.Parameter(torch.zeros(1, 512, d_model))
+        decoder_layer = TransformerDecoderLayer(d_model, nhead)
+        self.transformer_decoder = TransformerDecoder(decoder_layer, num_layers)
+        self.fc_out = nn.Linear(d_model, vocab_size)
+        self.quantum_field = QuantumField(field_dims=[1])
+
+    def forward(self, tgt, memory=None):
+        embed = self.embedding(tgt) + self.positional_encoding[:, :tgt.size(1), :]
+        qfield_out = self.quantum_field(embed)
+        output = self.transformer_decoder(qfield_out, memory) if memory is not None else self.transformer_decoder(qfield_out, qfield_out)
+        logits = self.fc_out(output)
+        return logits
+
+
+---
+
+🧠 Detailed Explanation
+
+
+---
+
+1. Class: QuantumGPT
+
+This class defines a GPT-like Transformer decoder with quantum field embedding:
+
+def __init__(self, vocab_size, d_model=512, nhead=8, num_layers=6):
+
+vocab_size: number of tokens in vocabulary.
+
+d_model: embedding and Transformer model dimension (default 512).
+
+nhead: number of attention heads in each Transformer layer (default 8).
+
+num_layers: number of Transformer decoder layers (default 6).
+
+
+
+---
+
+2. Embedding Layer
+
+self.embedding = nn.Embedding(vocab_size, d_model)
+
+Maps input token indices to dense vectors of size d_model.
+
+
+
+---
+
+3. Positional Encoding
+
+self.positional_encoding = nn.Parameter(torch.zeros(1, 512, d_model))
+
+Learned positional embeddings up to sequence length 512.
+
+Added to token embeddings to inject position information.
+
+
+
+---
+
+4. Transformer Decoder
+
+decoder_layer = TransformerDecoderLayer(d_model, nhead)
+self.transformer_decoder = TransformerDecoder(decoder_layer, num_layers)
+
+Stacks num_layers Transformer decoder layers.
+
+Each layer performs multi-head self-attention and feed-forward transformations.
+
+
+
+---
+
+5. Quantum Field Module
+
+self.quantum_field = QuantumField(field_dims=[1])
+
+QuantumField is a quantum-inspired embedding layer (imported from core.quantum_field).
+
+It processes the embeddings into a quantum field representation before decoding.
+
+Typically, this could introduce richer, quantum-structured latent representations.
+
+
+
+---
+
+6. Output Projection
+
+self.fc_out = nn.Linear(d_model, vocab_size)
+
+Projects Transformer outputs back to vocabulary dimension for token prediction logits.
+
+
+
+---
+
+7. Forward Pass
+
+def forward(self, tgt, memory=None):
+
+tgt: input target token sequences (batch_size x seq_len).
+
+memory: optional encoder memory input for Transformer decoder cross-attention.
+
+
+
+---
+
+embed = self.embedding(tgt) + self.positional_encoding[:, :tgt.size(1), :]
+
+Embed tokens and add positional encodings.
+
+
+
+---
+
+qfield_out = self.quantum_field(embed)
+
+Pass embeddings through quantum field encoder for quantum-enhanced representation.
+
+
+
+---
+
+output = self.transformer_decoder(qfield_out, memory) if memory is not None else self.transformer_decoder(qfield_out, qfield_out)
+
+If memory (encoder output) is provided, use it for cross-attention.
+
+Otherwise, use self-attention only (typical GPT style).
+
+
+
+---
+
+logits = self.fc_out(output)
+return logits
+
+Project decoder output to vocabulary logits for next-token prediction.
+
+
+
+---
+
+🔑 Summary
+
+QuantumGPT enhances classical Transformer decoders by preprocessing embeddings with a QuantumField module.
+
+Intended for tasks like autoregressive language modeling or sequence generation.
+
+Maintains typical GPT structure: token embeddings + positional encoding + Transformer decoder stack + linear output projection.
+
+Optional encoder memory input allows use as a decoder in encoder-decoder models.
+
+
+
+Here is a detailed explanation of ibmq.py including the full code and insights about its design and usage:
+
+
+---
+
+📁 File: ibmq.py
+
+
+---
+
+🧠 Purpose
+
+This file provides an interface class to connect with IBM Quantum Experience (IBMQ) hardware or simulators via Qiskit, execute quantum circuits simulating Hamiltonian evolution, and retrieve results as wavefunctions.
+
+
+---
+
+🔍 Full Code
+
+# pytron_qft/hardware/ibmq.py
+import qiskit
+from qiskit import QuantumCircuit, execute
+from qiskit.providers.ibmq import IBMQ
+import torch
+
+class IBMQInterface:
+    def __init__(self, api_token, backend_name='ibmq_qasm_simulator'):
+        self.api_token = api_token
+        self.backend_name = backend_name
+        self.provider = None
+        self.backend = None
+        
+    def connect(self):
+        IBMQ.save_account(self.api_token, overwrite=True)
+        IBMQ.load_account()
+        self.provider = IBMQ.get_provider(hub='ibm-q')
+        self.backend = self.provider.get_backend(self.backend_name)
+        return self.backend.status().operational
+    
+    def execute_evolution(self, hamiltonian, state, time):
+        """Execute Hamiltonian evolution on IBM hardware"""
+        n_qubits = len(state) // 2
+        qc = QuantumCircuit(n_qubits, n_qubits)
+        
+        # State preparation
+        for i, amp in enumerate(state):
+            bin_str = format(i, f'0{n_qubits}b')
+            qc.initialize({bin_str: amp}, range(n_qubits))
+        
+        # Hamiltonian evolution
+        qc.hamiltonian(hamiltonian, time, range(n_qubits))
+        
+        # Execute
+        job = execute(qc, self.backend, shots=1024)
+        result = job.result()
+        counts = result.get_counts(qc)
+        
+        # Convert to wavefunction
+        total_shots = sum(counts.values())
+        wavefunction = [0] * (2**n_qubits)
+        for state_str, count in counts.items():
+            idx = int(state_str, 2)
+            wavefunction[idx] = count / total_shots
+        
+        return torch.tensor(wavefunction, dtype=torch.cfloat)
+
+
+---
+
+🧩 Explanation
+
+1. Class: IBMQInterface
+
+Manages connection to IBMQ backends.
+
+Allows executing quantum circuits that simulate Hamiltonian evolution.
+
+
+
+---
+
+2. Initialization
+
+def __init__(self, api_token, backend_name='ibmq_qasm_simulator'):
+
+api_token: IBM Quantum Experience API token string.
+
+backend_name: IBMQ backend to use, defaults to simulator 'ibmq_qasm_simulator'.
+
+Stores token and backend info, initializes provider and backend as None.
+
+
+
+---
+
+3. Connect Method
+
+def connect(self):
+    IBMQ.save_account(self.api_token, overwrite=True)
+    IBMQ.load_account()
+    self.provider = IBMQ.get_provider(hub='ibm-q')
+    self.backend = self.provider.get_backend(self.backend_name)
+    return self.backend.status().operational
+
+Saves and loads IBMQ account credentials.
+
+Retrieves the provider and backend object.
+
+Returns whether the backend is operational (ready to run jobs).
+
+
+
+---
+
+4. Execute Evolution Method
+
+def execute_evolution(self, hamiltonian, state, time):
+
+Simulates time evolution of a quantum state under a given Hamiltonian on IBM hardware:
+
+hamiltonian: the Hamiltonian operator (assumed compatible with Qiskit).
+
+state: initial quantum state vector as a list or tensor of complex amplitudes.
+
+time: evolution time parameter.
+
+
+
+---
+
+Inside execute_evolution
+
+Calculate number of qubits from length of state vector:
+
+
+n_qubits = len(state) // 2
+
+> Note: This assumes the state length is 2 * n_qubits, which may need adjustment depending on input format.
+
+
+
+
+---
+
+Create a quantum circuit with qubits and classical bits:
+
+
+qc = QuantumCircuit(n_qubits, n_qubits)
+
+
+---
+
+State preparation — initialize each computational basis state amplitude into the circuit:
+
+
+for i, amp in enumerate(state):
+    bin_str = format(i, f'0{n_qubits}b')
+    qc.initialize({bin_str: amp}, range(n_qubits))
+
+> This is not the usual way Qiskit’s initialize is used; typically initialize takes a statevector for all qubits, not a dictionary. This may need correction.
+
+
+
+
+---
+
+Hamiltonian evolution — applies the Hamiltonian evolution unitary for time t:
+
+
+qc.hamiltonian(hamiltonian, time, range(n_qubits))
+
+> This method is not part of standard Qiskit and might represent a custom extension or pseudocode. In practice, one would use qiskit.opflow or qiskit.aqua to build time evolution circuits.
+
+
+
+
+---
+
+Execution and result retrieval:
+
+
+job = execute(qc, self.backend, shots=1024)
+result = job.result()
+counts = result.get_counts(qc)
+
+Run the circuit on the specified backend, then get the measurement counts.
+
+
+
+---
+
+Convert counts to approximate wavefunction:
+
+
+total_shots = sum(counts.values())
+wavefunction = [0] * (2**n_qubits)
+for state_str, count in counts.items():
+    idx = int(state_str, 2)
+    wavefunction[idx] = count / total_shots
+
+Counts frequencies approximate probabilities for computational basis states.
+
+Convert those to amplitudes (non-negative real probabilities here, so complex phase info is lost).
+
+
+
+---
+
+Return tensor wavefunction
+
+
+return torch.tensor(wavefunction, dtype=torch.cfloat)
+
+Return a complex-valued torch tensor representing the (magnitude only) wavefunction.
+
+
+
+---
+
+⚠️ Notes & Caveats
+
+The initialize call with a dict looks incorrect for Qiskit — usually initialize(statevector, qubits) is used with a full vector.
+
+qc.hamiltonian(...) is not a standard Qiskit API; typically Hamiltonian simulation requires decomposition into gates or use of Qiskit's opflow or evolution modules.
+
+The wavefunction reconstruction from measurement counts ignores phase information, so the returned tensor is a probability distribution, not a full quantum state vector.
+
+n_qubits = len(state)//2 seems questionable; state vectors for n qubits have length 2**n.
+
+To run on real IBMQ hardware, error mitigation, transpilation, and queue management are required but not handled here.
+
+This code snippet assumes access to IBMQ API and a proper token.
+
+
+
+---
+
+🔑 Summary
+
+ibmq.py wraps IBMQ quantum backend interaction to:
+
+Connect and select a backend.
+
+Prepare quantum circuits that simulate Hamiltonian evolution.
+
+Run circuits and retrieve measurement results.
+
+Convert measurements to an approximate wavefunction tensor for downstream quantum algorithm usage.
+
+
+It serves as a bridge between classical code and IBM quantum hardware or simulators using Qiskit.
+
+
+Here's a detailed explanation and everything about the google_q.py file, along with the provided code:
+
+
+---
+
+📁 File: google_q.py
+
+
+---
+
+🧠 Purpose
+
+This module provides an interface to interact with Google's quantum computing framework Cirq for simulating or running Hamiltonian evolution on Google's quantum processors or simulators.
+
+
+---
+
+🔍 Full Code
+
+# pytron_qft/hardware/google_q.py
+from cirq import Simulator, LineQubit
+import cirq
+import torch
+
+class GoogleQuantumInterface:
+    def __init__(self, processor_name='simulator'):
+        self.processor_name = processor_name
+        self.simulator = Simulator() if processor_name == 'simulator' else None
+        
+    def connect(self, processor=None):
+        if processor:
+            self.processor = processor
+        return True
+    
+    def execute_evolution(self, hamiltonian, state, time):
+        """Execute Hamiltonian evolution on Google hardware"""
+        n_qubits = int(torch.log2(torch.tensor(len(state))))
+        qubits = LineQubit.range(n_qubits)
+        circuit = cirq.Circuit()
+        
+        # State preparation
+        circuit.append(cirq.initialize(qubits, state))
+        
+        # Hamiltonian evolution
+        for term, coeff in hamiltonian.terms():
+            op = 1
+            for q, pauli in term:
+                op *= getattr(cirq, pauli)(qubits[q])
+            circuit.append(cirq.PauliSumExponent(op, exponent=-time*coeff))
+        
+        # Execute
+        if self.processor_name != 'simulator':
+            result = self.processor.run(circuit, repetitions=1000)
+        else:
+            result = self.simulator.simulate(circuit)
+        
+        # Convert to wavefunction
+        if self.processor_name == 'simulator':
+            return torch.tensor(result.final_state_vector, dtype=torch.cfloat)
+        else:
+            wavefunction = [0] * (2**n_qubits)
+            for state_str, count in result.histogram(key='m'):
+                idx = int(state_str, 2)
+                wavefunction[idx] = count / 1000
+            return torch.tensor(wavefunction, dtype=torch.cfloat)
+
+
+---
+
+🧩 Explanation
+
+1. Class: GoogleQuantumInterface
+
+Wraps around Cirq to either simulate or run Hamiltonian time evolution on Google's quantum hardware or simulator.
+
+Abstracts processor connection and execution details.
+
+
+
+---
+
+2. Initialization
+
+def __init__(self, processor_name='simulator'):
+    self.processor_name = processor_name
+    self.simulator = Simulator() if processor_name == 'simulator' else None
+
+By default, the processor is set to "simulator" to run local simulation.
+
+If a real quantum processor is specified, the simulator is not initialized.
+
+
+
+---
+
+3. Connect Method
+
+def connect(self, processor=None):
+    if processor:
+        self.processor = processor
+    return True
+
+Accepts a real quantum processor interface if provided.
+
+Otherwise, returns True indicating a successful "connection" (for simulator).
+
+In real use, this could be extended to establish connections to actual hardware or cloud resources.
+
+
+
+---
+
+4. Execute Evolution Method
+
+def execute_evolution(self, hamiltonian, state, time):
+
+This method simulates or runs time evolution of a quantum state under a given Hamiltonian for a duration time.
+
+
+---
+
+Details inside execute_evolution
+
+Number of qubits calculation
+
+
+n_qubits = int(torch.log2(torch.tensor(len(state))))
+
+Determines the number of qubits from the length of the initial state vector (len(state) = 2^n_qubits).
+
+
+
+---
+
+Create qubits and circuit
+
+
+qubits = LineQubit.range(n_qubits)
+circuit = cirq.Circuit()
+
+Creates a line of qubits indexed from 0 to n_qubits-1.
+
+Initializes an empty Cirq circuit.
+
+
+
+---
+
+State preparation
+
+
+circuit.append(cirq.initialize(qubits, state))
+
+Appends a state initialization operation to the circuit.
+
+This prepares the system in the provided state vector.
+
+
+> Note: Cirq’s initialize is a valid operation but in practice might require special handling for arbitrary states.
+
+
+
+
+---
+
+Hamiltonian evolution
+
+
+for term, coeff in hamiltonian.terms():
+    op = 1
+    for q, pauli in term:
+        op *= getattr(cirq, pauli)(qubits[q])
+    circuit.append(cirq.PauliSumExponent(op, exponent=-time*coeff))
+
+Iterates over the Hamiltonian terms.
+
+Each term consists of a Pauli operator acting on specified qubits with a coefficient.
+
+Builds the unitary evolution operator for each term as a Pauli exponentiation with parameter -time * coeff.
+
+Appends these exponentials to the circuit for time evolution.
+
+
+
+---
+
+Execution
+
+
+if self.processor_name != 'simulator':
+    result = self.processor.run(circuit, repetitions=1000)
+else:
+    result = self.simulator.simulate(circuit)
+
+If using real hardware, runs the circuit with 1000 shots to gather statistics.
+
+Otherwise, simulates the circuit to get the final quantum state vector.
+
+
+
+---
+
+Result processing
+
+If simulated, directly returns the final quantum state as a PyTorch complex tensor:
+
+
+return torch.tensor(result.final_state_vector, dtype=torch.cfloat)
+
+If run on hardware, reconstructs a probability wavefunction from measurement histograms:
+
+
+wavefunction = [0] * (2**n_qubits)
+for state_str, count in result.histogram(key='m'):
+    idx = int(state_str, 2)
+    wavefunction[idx] = count / 1000
+return torch.tensor(wavefunction, dtype=torch.cfloat)
+
+
+---
+
+⚠️ Notes & Considerations
+
+hamiltonian.terms() and the form of terms assumed here imply a custom Hamiltonian class with .terms() returning iterable (term, coeff) pairs.
+
+The term is expected to be iterable of (qubit_index, 'X'/'Y'/'Z') tuples representing Pauli operators.
+
+cirq.PauliSumExponent is not a standard Cirq function — the real implementation might involve cirq.PauliString exponentiation (cirq.PauliString.exp).
+
+This code does not handle decomposition of general Hamiltonians or Trotterization steps explicitly.
+
+The state preparation and measurement on real hardware are simplified — actual circuits might need more complex error mitigation.
+
+result.histogram(key='m') assumes measurement results keyed by 'm', which requires measurement gates and keys to be defined properly.
+
+
+
+---
+
+🔑 Summary
+
+google_q.py provides a Google Quantum Interface using Cirq to:
+
+Initialize quantum states.
+
+Apply Hamiltonian time evolution via Pauli operator exponentiation.
+
+Run on local simulator or real Google quantum processors.
+
+Retrieve and convert results into usable PyTorch tensors representing quantum states or measurement probabilities.
+
+
+
+Here's a detailed explanation and everything about the photonic.py file with the provided code:
+
+
+---
+
+📁 File: photonic.py
+
+
+---
+
+🧠 Purpose
+
+This module provides an interface to interact with photonic quantum hardware or simulators using the Strawberry Fields library by Xanadu. It allows simulating or executing Hamiltonian time evolution on photonic quantum processors.
+
+
+---
+
+🔍 Full Code
+
+# pytron_qft/hardware/photonic.py
+import strawberryfields as sf
+from strawberryfields.ops import *
+import torch
+
+class PhotonicQuantumInterface:
+    def __init__(self, device='gaussian', cutoff_dim=10):
+        self.device = device
+        self.cutoff_dim = cutoff_dim
+        
+    def execute_evolution(self, hamiltonian, state, time):
+        """Execute Hamiltonian evolution on photonic hardware"""
+        prog = sf.Program(len(hamiltonian.modes))
+        
+        with prog.context as q:
+            # State preparation
+            for i, amp in enumerate(state):
+                if isinstance(amp, complex) and abs(amp) > 0:
+                    Fock(i) | q[0]
+            
+            # Hamiltonian evolution
+            for term in hamiltonian.terms():
+                if term[0][0] == 'X':
+                    Xgate(time * term[1]) | q[term[0][1]]
+                elif term[0][0] == 'Z':
+                    Zgate(time * term[1]) | q[term[0][1]]
+                elif term[0][0] == 'a^+a':
+                    Dgate(time * term[1]) | q[term[0][1]]
+        
+        # Execute
+        eng = sf.Engine(self.device, backend_options={"cutoff_dim": self.cutoff_dim})
+        result = eng.run(prog)
+        
+        # Get wavefunction
+        wavefunction = result.state.ket()
+        return torch.tensor(wavefunction, dtype=torch.cfloat)
+
+
+---
+
+🧩 Explanation
+
+1. Class: PhotonicQuantumInterface
+
+An interface for running photonic quantum computations using the Strawberry Fields framework.
+
+Supports Gaussian or other photonic backend devices.
+
+Encodes the state and applies Hamiltonian evolution to photonic modes.
+
+
+
+---
+
+2. Initialization
+
+def __init__(self, device='gaussian', cutoff_dim=10):
+    self.device = device
+    self.cutoff_dim = cutoff_dim
+
+device: Specifies the photonic device backend, defaulting to 'gaussian' simulator.
+
+cutoff_dim: The Hilbert space cutoff dimension for Fock basis truncation (photon number basis). Controls accuracy and resource usage.
+
+
+
+---
+
+3. Method: execute_evolution
+
+def execute_evolution(self, hamiltonian, state, time):
+
+Runs Hamiltonian time evolution on photonic hardware or simulator.
+
+
+
+---
+
+4. Program Initialization
+
+prog = sf.Program(len(hamiltonian.modes))
+
+Creates a Strawberry Fields quantum program with the number of modes equal to the modes specified in the Hamiltonian.
+
+
+
+---
+
+5. Context Block
+
+with prog.context as q:
+
+Defines the operations acting on the quantum modes q.
+
+
+
+---
+
+6. State Preparation
+
+for i, amp in enumerate(state):
+    if isinstance(amp, complex) and abs(amp) > 0:
+        Fock(i) | q[0]
+
+For each amplitude in the initial state, prepares the corresponding Fock state on mode 0 if amplitude is nonzero and complex.
+
+Note: This snippet assumes all population is put into mode q[0] repeatedly, which may not prepare arbitrary multimode states correctly.
+
+
+
+---
+
+7. Hamiltonian Evolution
+
+for term in hamiltonian.terms():
+    if term[0][0] == 'X':
+        Xgate(time * term[1]) | q[term[0][1]]
+    elif term[0][0] == 'Z':
+        Zgate(time * term[1]) | q[term[0][1]]
+    elif term[0][0] == 'a^+a':
+        Dgate(time * term[1]) | q[term[0][1]]
+
+Applies photonic gates based on Hamiltonian terms:
+
+Xgate corresponds to phase space displacement in the x-quadrature.
+
+Zgate corresponds to phase space displacement in the p-quadrature.
+
+Dgate corresponds to a general displacement operator (related to creation/annihilation operators).
+
+
+Each gate is applied to the mode indexed by term[0][1], scaled by time * coeff.
+
+
+
+---
+
+8. Execution
+
+eng = sf.Engine(self.device, backend_options={"cutoff_dim": self.cutoff_dim})
+result = eng.run(prog)
+
+Creates an engine for the chosen device/backend.
+
+Runs the prepared quantum program.
+
+
+
+---
+
+9. Result Extraction
+
+wavefunction = result.state.ket()
+return torch.tensor(wavefunction, dtype=torch.cfloat)
+
+Retrieves the final state vector (ket) from the photonic simulation.
+
+Converts it into a PyTorch complex tensor for further use.
+
+
+
+---
+
+⚠️ Notes & Considerations
+
+The current state preparation only acts on the first mode q[0]. For multimode states, state preparation logic needs extension.
+
+hamiltonian.terms() should be compatible with this structure: terms are tuples with a description of operator and mode index, and coefficient.
+
+Photonic gates here are simplified and only handle basic displacement operations; more complex Hamiltonians may require squeezing, rotation, or other photonic gates.
+
+cutoff_dim controls the Fock space truncation and accuracy of the simulation—larger values increase precision but consume more memory.
+
+
+
+---
+
+🔑 Summary
+
+photonic.py defines a photonic quantum interface for:
+
+Initializing quantum states on photonic modes.
+
+Applying Hamiltonian evolution using displacement-like gates (Xgate, Zgate, Dgate).
+
+Running the quantum program on a photonic simulator or hardware backend supported by Strawberry Fields.
+
+Returning the resulting quantum state as a PyTorch tensor for further quantum information or machine learning workflows.
+
+
+
+Here's a complete, structured explanation of simulator.py with the provided code:
+
+
+---
+
+📁 File: simulator.py
+
+
+---
+
+🧠 Purpose
+
+This module provides a quantum hardware interface abstraction and a simulator implementation that performs exact quantum state evolution and measurement using PyTorch tensors. It's a classical simulator for quantum computations.
+
+
+---
+
+🔍 Full Code
+
+# pytron_qft/hardware/simulator.py
+import torch
+from abc import ABC, abstractmethod
+
+class QuantumHardwareInterface(ABC):
+    @abstractmethod
+    def execute_evolution(self, hamiltonian, state, time):
+        pass
+
+class Simulator(QuantumHardwareInterface):
+    def __init__(self, precision=torch.cfloat):
+        self.precision = precision
+        
+    def execute_evolution(self, hamiltonian, state, time):
+        # Unitary evolution: U = exp(-iHt)
+        evolution_op = torch.matrix_exp(-1j * hamiltonian * time)
+        return torch.matmul(evolution_op, state)
+    
+    def measure(self, state, observable):
+        # Compute expectation value: <ψ|O|ψ>
+        return torch.vdot(state, torch.matmul(observable, state)).real
+
+
+---
+
+🧩 Explanation
+
+1. Class: QuantumHardwareInterface
+
+class QuantumHardwareInterface(ABC):
+    @abstractmethod
+    def execute_evolution(self, hamiltonian, state, time):
+        pass
+
+Abstract base class defining the interface any quantum hardware or simulator must implement.
+
+Defines the method execute_evolution to run the time evolution of a quantum state under a Hamiltonian.
+
+Enforces subclasses to implement this method (using @abstractmethod).
+
+
+
+---
+
+2. Class: Simulator
+
+A classical quantum simulator implementing QuantumHardwareInterface for exact quantum evolution.
+
+
+---
+
+3. Initialization
+
+def __init__(self, precision=torch.cfloat):
+    self.precision = precision
+
+Sets numerical precision (default: complex floating point, torch.cfloat).
+
+Allows flexibility for higher precision if needed.
+
+
+
+---
+
+4. Method: execute_evolution
+
+def execute_evolution(self, hamiltonian, state, time):
+    # Unitary evolution: U = exp(-iHt)
+    evolution_op = torch.matrix_exp(-1j * hamiltonian * time)
+    return torch.matmul(evolution_op, state)
+
+Computes the unitary time evolution operator  where:
+
+ = Hamiltonian (square matrix)
+
+ = evolution time (scalar)
+
+
+Uses PyTorch's matrix exponential torch.matrix_exp for precise operator calculation.
+
+Applies the operator to the input quantum state state.
+
+Returns the evolved quantum state.
+
+
+
+---
+
+5. Method: measure
+
+def measure(self, state, observable):
+    # Compute expectation value: <ψ|O|ψ>
+    return torch.vdot(state, torch.matmul(observable, state)).real
+
+Calculates the expectation value of an observable  in the quantum state :
+
+
+\langle O \rangle = \langle \psi | O | \psi \rangle
+
+Returns the real part of the expectation value (observable outcomes are real-valued).
+
+
+
+---
+
+⚙️ Usage Overview
+
+Instantiate Simulator.
+
+Provide a Hamiltonian matrix , initial state vector , and evolution time .
+
+Call execute_evolution to simulate the quantum state after time evolution.
+
+Call measure to compute observable expectation values on resulting states.
+
+
+
+---
+
+⚠️ Notes
+
+The Hamiltonian and state should be PyTorch tensors of compatible dimensions.
+
+State vector should be normalized for meaningful physical results.
+
+This simulator assumes exact unitary evolution without noise or errors.
+
+Performance scales exponentially with the number of qubits due to matrix size.
+
+
+
+---
+
+🔑 Summary
+
+simulator.py defines a minimal but powerful classical quantum simulator for exact state evolution and measurement by:
+
+Defining an abstract hardware interface.
+
+Providing an implementation using matrix exponentials and tensor algebra.
+
+Enabling simulation workflows fully inside PyTorch.
+
+
+
+Here's a complete and structured explanation of the mnist.py module from pytron_qft/data/mnist.py:
+
+
+---
+
+📁 File: mnist.py
+
+Module Path: pytron_qft/data/mnist.py
+
+
+---
+
+🎯 Purpose
+
+This module defines a specialized data handler, QuantumMNIST, to load and preprocess the MNIST dataset for use in quantum machine learning experiments. It supports both spatial and spectral (Fourier) quantum encodings of image data.
+
+
+---
+
+🔍 Full Code Summary
+
+import torch
+import torchvision
+from torchvision.transforms import Compose, ToTensor, Normalize
+from .field_ops import spatial_to_spectral
+
+class QuantumMNIST:
+    def __init__(self, batch_size=64, spectral=True):
+        ...
+    def get_loaders(self):
+        ...
+    def quantum_encode(self, batch):
+        ...
+
+
+---
+
+🧩 Class: QuantumMNIST
+
+A utility class for loading and quantum-encoding MNIST data.
+
+### 🔧 __init__(...)
+
+def __init__(self, batch_size=64, spectral=True):
+    ...
+
+Parameters:
+
+batch_size (int): Number of samples per batch. Default is 64.
+
+spectral (bool): If True, converts images to spectral (Fourier) domain. Otherwise, retains spatial domain.
+
+
+Transformations Applied:
+
+ToTensor: Converts PIL images to tensors.
+
+Normalize((0.1307,), (0.3081,)): Normalizes the data using MNIST mean and std dev (standard normalization).
+
+
+Datasets:
+
+Downloads and loads train and test partitions of MNIST dataset from torchvision.
+
+
+
+
+---
+
+🔄 get_loaders(...)
+
+def get_loaders(self):
+    ...
+
+Returns:
+
+train_loader: PyTorch DataLoader for training set.
+
+test_loader: PyTorch DataLoader for test set.
+
+
+Purpose:
+
+Encapsulates the construction of data loaders using the stored dataset and batch size.
+
+
+
+
+---
+
+⚛️ quantum_encode(...)
+
+def quantum_encode(self, batch):
+    images, labels = batch
+    if self.spectral:
+        return spatial_to_spectral(images), labels
+    return torch.view_as_complex(images.unsqueeze(-1)), labels
+
+Purpose:
+
+Converts classical image tensors into quantum-encoded representations.
+
+
+Encoding Modes:
+
+If self.spectral is True: applies spatial_to_spectral (assumed to be a Fourier transform or similar).
+
+If False: transforms the images to complex wavefunctions using torch.view_as_complex.
+
+
+Returns:
+
+A tuple: (quantum_images, labels)
+
+quantum_images is either a spectral tensor or complex tensor for quantum processing.
+
+labels is the unchanged ground truth.
+
+
+
+
+
+---
+
+🔌 Dependencies
+
+Torch: For tensor manipulation and DataLoader.
+
+Torchvision: For MNIST loading and basic transformations.
+
+field_ops.spatial_to_spectral: A custom utility likely implementing Fourier/spectral transformations.
+
+
+
+---
+
+✅ Example Usage
+
+from pytron_qft.data.mnist import QuantumMNIST
+
+dataset = QuantumMNIST(batch_size=128, spectral=True)
+train_loader, test_loader = dataset.get_loaders()
+
+for batch in train_loader:
+    q_images, labels = dataset.quantum_encode(batch)
+    break
+
+
+---
+
+💡 Design Considerations
+
+Flexible encoding: Supports both spectral and complex-valued spatial representations, enabling experiments in different quantum representations.
+
+Modularity: Keeps preprocessing separate from training logic.
+
+Extendability: Easy to plug into quantum neural networks requiring wavefunction-like inputs.
+
+
+
+---
+
+⚠️ Potential Enhancements
+
+Support for other datasets (e.g., Fashion-MNIST).
+
+Parameterized encoding backends (e.g., amplitude encoding, phase encoding).
+
+CUDA-ready encoding for spectral transforms.
+
+
+
+---
+
+🧠 Summary
+
+Component	Role
+
+QuantumMNIST	Class to manage MNIST data for quantum models
+get_loaders()	Returns training/testing data loaders
+quantum_encode()	Converts images to spectral or complex representation
+spatial_to_spectral	Converts spatial tensors to frequency domain
+
+
+This module is a bridge between classical image data and quantum simulation-ready formats, which is crucial for running hybrid models like those in the pytron_qft framework.
+
+Here's a complete and structured breakdown of the cifar.py module, which defines a quantum-encoded version of the CIFAR-10 dataset for use in quantum or hybrid quantum-classical learning workflows.
+
+
+---
+
+📄 File: cifar.py
+
+Module Path: pytron_qft/data/cifar.py
+
+
+---
+
+🎯 Purpose
+
+This module provides:
+
+A custom PyTorch Dataset class QuantumCIFAR that loads CIFAR-10 images and converts them into quantum-ready formats using complex, spectral, and renormalized field encodings.
+
+A utility function create_cifar_loaders to create train/test DataLoaders easily.
+
+
+
+---
+
+🔧 Imports
+
+import torch
+import torchvision
+import torchvision.transforms as transforms
+from torch.utils.data import Dataset
+from .field_ops import spatial_to_spectral, renormalize_field
+
+torch and torchvision: For tensor handling and loading CIFAR-10.
+
+spatial_to_spectral: Likely a function that performs a 2D Fourier transform.
+
+renormalize_field: Removes small amplitudes (cutoff-based) for sparsity or stability.
+
+
+
+---
+
+🧩 Class: QuantumCIFAR
+
+🏗️ __init__(...)
+
+def __init__(self, root='./data', train=True, spectral=True, 
+             renormalize=True, cutoff=1e-3, download=True)
+
+Arguments:
+
+root: Where the CIFAR-10 dataset is/will be stored.
+
+train: Whether to load training data (True) or test data.
+
+spectral: Whether to convert images to frequency (spectral) domain.
+
+renormalize: Whether to suppress low-energy amplitudes.
+
+cutoff: Threshold for renormalization of small amplitude values.
+
+download: Download dataset if it's not present locally.
+
+
+Transform Applied:
+
+transforms.Normalize((0.4914, 0.4822, 0.4465), 
+                     (0.2470, 0.2435, 0.2616))
+
+Normalizes each color channel (R, G, B) based on CIFAR-10 statistics.
+
+
+---
+
+🔢 __len__(...)
+
+Returns the total number of images in the dataset:
+
+return len(self.dataset)
+
+
+---
+
+🧪 __getitem__(self, idx)
+
+Fetches and encodes a single CIFAR-10 image.
+
+Steps:
+
+1. Convert image to complex-valued tensor:
+
+complex_img = torch.view_as_complex(torch.stack((image, torch.zeros_like(image)), dim=-1))
+
+Adds an imaginary channel initialized to 0.
+
+
+2. Apply spectral transformation (if enabled):
+
+if self.spectral:
+    complex_img = spatial_to_spectral(complex_img)
+
+
+3. Apply renormalization cutoff (if enabled):
+
+if self.renormalize:
+    complex_img = renormalize_field(complex_img, self.cutoff)
+
+
+
+Returns:
+
+return complex_img, label
+
+
+---
+
+🏷️ get_class_names(...)
+
+Returns a list of CIFAR-10 class names:
+
+['airplane', 'automobile', 'bird', 'cat', 'deer',
+ 'dog', 'frog', 'horse', 'ship', 'truck']
+
+
+---
+
+🔁 Function: create_cifar_loaders(...)
+
+def create_cifar_loaders(batch_size=64, spectral=True, renormalize=True)
+
+Purpose: Easily create DataLoaders for both train and test splits.
+
+Returns:
+
+train_loader: DataLoader for training set.
+
+test_loader: DataLoader for test set.
+
+class_names: List of label names.
+
+
+Example:
+
+train_loader, test_loader, class_names = create_cifar_loaders()
+
+
+---
+
+🔬 Example Use
+
+train_loader, test_loader, class_names = create_cifar_loaders()
+for images, labels in train_loader:
+    print(images.shape)  # e.g., [64, 3, 32, 32] complex
+    break
+
+
+---
+
+🧠 Key Concepts
+
+Feature	Description
+
+Quantum Encoding	Converts classical images to complex-valued tensors for quantum computation.
+Spectral Transform	Translates image to Fourier/spectral domain, useful for frequency-based processing.
+Renormalization	Prunes values below a threshold for efficiency or sparsity.
+Complex Tensor	Encodes amplitude and (optionally) phase in a format that mimics quantum wavefunctions.
+
+
+
+---
+
+⚠️ Notes
+
+Requires spatial_to_spectral and renormalize_field implementations to function properly.
+
+Does not yet support GPU-based encoding or batching optimizations.
+
+Designed to integrate into hybrid quantum-classical ML pipelines, especially with quantum simulators or hardware interfaces.
+
+
+
+---
+
+✅ Summary
+
+QuantumCIFAR is a custom PyTorch Dataset for CIFAR-10 that provides:
+
+Complex and spectral encodings,
+
+Optional renormalization,
+
+Compatibility with quantum simulation pipelines.
+
+
+Ideal Use Cases:
+
+Quantum GANs,
+
+Quantum-augmented vision models,
+
+Quantum field encoders.
+
+
+Here's a comprehensive breakdown of materials.py, which implements data loading for real and synthetic materials science datasets using quantum field representations.
+
+
+---
+
+📄 File: materials.py
+
+Location: pytron_qft/data/materials.py
+
+
+---
+
+🧠 Purpose
+
+This module provides:
+
+QuantumMaterials: A dataset class for real crystal structures in JSON/CSV format, transformed into complex quantum fields.
+
+SyntheticMaterials: A random dataset generator simulating electron-density fields.
+
+Data Loader Creators: Functions for train/val/test loaders from real or synthetic materials.
+
+
+
+---
+
+🔧 Imports
+
+import torch
+import numpy as np
+import pandas as pd
+from torch.utils.data import Dataset
+from pymatgen.core import Structure
+from .field_ops import spatial_to_spectral, renormalize_field
+
+torch: For tensor computations and dataset handling.
+
+pymatgen: Parses material structures in JSON (CIF-like) format.
+
+spatial_to_spectral: Converts spatial grid to frequency domain.
+
+renormalize_field: Removes small amplitudes below a cutoff threshold.
+
+
+
+---
+
+🔬 Class: QuantumMaterials
+
+🏗️ __init__
+
+def __init__(self, data_path, structure_column='structure',
+             target_column='formation_energy', max_atoms=100,
+             spectral=True, renormalize=True, cutoff=1e-3)
+
+Parameters:
+
+data_path: Path to JSON or CSV file with structure and target.
+
+structure_column: Column in file containing structure strings (in pymatgen JSON format).
+
+target_column: Column with target values (e.g., formation energy).
+
+max_atoms: Optional, unused in current code.
+
+spectral: Whether to apply Fourier transformation.
+
+renormalize: Whether to zero-out small values.
+
+cutoff: Threshold for renormalization.
+
+
+🧠 _create_element_map()
+
+Builds a mapping: {element_symbol: index} to encode atom types.
+
+🔁 _structure_to_field(structure)
+
+Converts a pymatgen Structure into a 3D complex field:
+
+Uses a 32×32×32 grid.
+
+Each atom's fractional coordinates are scaled to the grid.
+
+Adds (1 + i) × atomic_type_index to the corresponding voxel.
+
+
+🔢 __getitem__(idx)
+
+Steps:
+
+1. Parse structure JSON.
+
+
+2. Create grid via _structure_to_field.
+
+
+3. Optionally apply spatial_to_spectral.
+
+
+4. Optionally apply renormalize_field.
+
+
+5. Return (field, target).
+
+
+
+
+---
+
+⚗️ Class: SyntheticMaterials
+
+🏗️ __init__
+
+Creates a dataset of random 3D complex-valued tensors (electron fields).
+
+Parameters:
+
+num_samples: Total number of synthetic samples.
+
+grid_size: Field resolution.
+
+spectral: Whether to apply Fourier transform.
+
+
+🔁 __getitem__
+
+1. Generates random real + imaginary grids.
+
+
+2. Converts to complex tensor.
+
+
+3. Applies spectral transformation if required.
+
+
+4. Generates a random target value.
+
+
+
+
+---
+
+🔁 create_materials_loaders(...)
+
+def create_materials_loaders(data_path, batch_size=8, spectral=True)
+
+Splits the QuantumMaterials dataset:
+
+70% training
+
+15% validation
+
+15% test
+
+
+Returns corresponding DataLoaders.
+
+
+---
+
+🧪 create_synthetic_loaders(...)
+
+def create_synthetic_loaders(batch_size=8, spectral=True)
+
+Same as above but using SyntheticMaterials (1000 total samples).
+
+
+---
+
+💡 Example Usage
+
+Real Materials:
+
+train_loader, val_loader, test_loader = create_materials_loaders('materials_data.csv')
+
+Synthetic Dataset:
+
+train_loader, val_loader, test_loader = create_synthetic_loaders()
+
+
+---
+
+📦 Output Data Format
+
+Field: A torch.cfloat tensor with shape [32, 32, 32]
+
+Target: A float scalar (e.g., formation energy)
+
+
+
+---
+
+🧠 Key Features Summary
+
+Feature	Description
+
+QuantumMaterials	Encodes real material structures into 3D quantum fields.
+SyntheticMaterials	Generates mock quantum materials for testing pipelines.
+Spectral Transform	Converts fields to frequency domain (Fourier-based).
+Renormalization	Suppresses noise/amplitude clutter via thresholding.
+Pymatgen Integration	Uses pymatgen.Structure.from_str for JSON parsing.
+
+
+
+---
+
+✅ Final Notes
+
+Structure format in JSON must be compatible with pymatgen.
+
+Grid resolution is fixed at 32³ but can be parameterized.
+
+Designed for use in hybrid or fully quantum-aware ML pipelines, including quantum field simulation, QML regression tasks, or learned Hamiltonian estimation.
+
+Here's a complete breakdown and explanation of the trainer.py module, which implements a training and validation routine tailored for quantum field models.
+
+
+---
+
+📄 File: trainer.py
+
+Location: pytron_qft/training/trainer.py
+
+
+---
+
+🧠 Purpose
+
+This module provides the QFTrainer class, which:
+
+Manages training and validation of a quantum field neural network.
+
+Supports quantum-specific loss computation via a custom collapse() method.
+
+Computes quantum metrics such as entanglement entropy and Betti numbers.
+
+Includes support for custom training callbacks.
+
+
+
+---
+
+🔧 Imports
+
+import torch
+from tqdm import tqdm
+from .metrics import entanglement_entropy, betti_numbers
+
+torch: PyTorch framework for model training.
+
+tqdm: For real-time progress bars.
+
+entanglement_entropy, betti_numbers: Quantum field-specific evaluation metrics.
+
+
+
+---
+
+🏗️ Class: QFTrainer
+
+📌 __init__(self, model, optimizer, device, callbacks=None)
+
+Initializes the trainer.
+
+Parameters:
+
+model: Neural network (must implement .forward() and .collapse()).
+
+optimizer: PyTorch optimizer (e.g., Adam, SGD).
+
+device: CUDA or CPU device for training.
+
+callbacks: List of callback objects (optional). Each must implement on_batch_end().
+
+
+self.model = model.to(device)
+self.optimizer = optimizer
+self.device = device
+self.callbacks = callbacks or []
+
+
+---
+
+🔁 train_epoch(self, train_loader)
+
+Trains the model for one full epoch.
+
+def train_epoch(self, train_loader):
+
+🔄 Steps:
+
+1. Set model to training mode.
+
+
+2. Loop through each batch in train_loader:
+
+Move data and targets to the device.
+
+Zero the optimizer gradients.
+
+Perform quantum evolution via output = model(data).
+
+Use model.collapse(output, target) to compute loss.
+
+Backpropagate and update weights.
+
+Track total loss.
+
+Run any callbacks (e.g., logging or monitoring).
+
+
+
+
+🔁 Return:
+
+Average loss for the epoch.
+
+
+
+---
+
+🔍 validate(self, test_loader)
+
+Evaluates model performance on the test/validation set.
+
+def validate(self, test_loader):
+
+🔄 Steps:
+
+1. Set model to evaluation mode.
+
+
+2. Disable gradient calculation.
+
+
+3. Loop through batches:
+
+Forward pass and compute loss with .collapse().
+
+Compute accuracy using argmax predictions.
+
+Calculate quantum metrics:
+
+entanglement_entropy(output)
+
+betti_numbers(output)
+
+
+
+
+
+📊 Returns:
+
+avg_loss: Average loss on test set.
+
+accuracy: Classification accuracy.
+
+entropy: Entanglement entropy.
+
+betti: Betti numbers (topological features of the output).
+
+
+
+---
+
+📦 Output Expectations
+
+The model must implement:
+
+forward(data) → returns quantum-evolved output.
+
+collapse(output, target) → returns a scalar loss (e.g., energy or classification loss).
+
+
+
+---
+
+📈 Example Usage
+
+trainer = QFTrainer(model, optimizer, device)
+for epoch in range(num_epochs):
+    train_loss = trainer.train_epoch(train_loader)
+    val_loss, acc, entropy, betti = trainer.validate(test_loader)
+    print(f"Epoch {epoch}: Train Loss={train_loss:.4f}, Val Loss={val_loss:.4f}, Acc={acc:.2f}%")
+
+
+---
+
+🧠 Notes on Quantum Metrics
+
+entanglement_entropy(output)
+
+Measures quantum entanglement (e.g., Von Neumann entropy).
+
+Useful for quantum systems where superposition/mixed states exist.
+
+
+betti_numbers(output)
+
+Topological descriptor: counts holes, voids, and connected components.
+
+Captures structural complexity of wavefunctions or spatial fields.
+
+
+
+---
+
+✅ Summary
+
+Component	Description
+
+QFTrainer	Core training/validation logic
+.train_epoch()	Backprop-based training loop with quantum evolution
+.validate()	Evaluation with quantum and classical metrics
+collapse()	Custom quantum measurement loss function
+Callbacks	Optional hooks (e.g., logging, schedulers)
+Quantum Metrics	entanglement_entropy, betti_numbers
+
+
+
+Here is a comprehensive breakdown and explanation of the metrics.py module.
+
+
+---
+
+📄 File: metrics.py
+
+Location: pytron_qft/training/metrics.py
+Purpose: Provides quantum and topological evaluation metrics for quantum field learning tasks.
+
+
+---
+
+🔧 Imports
+
+import torch
+import numpy as np
+from gudhi import RipsComplex
+
+Description:
+
+torch: Used for tensor math (wavefunctions, entropy).
+
+numpy: Converts tensors to NumPy arrays for Gudhi compatibility.
+
+gudhi.RipsComplex: Library for computing persistent homology (topological data analysis).
+
+
+
+---
+
+🧠 Function: entanglement_entropy(wavefunction)
+
+def entanglement_entropy(wavefunction):
+    """Calculate entanglement entropy of wavefunction"""
+    density_matrix = torch.outer(wavefunction, wavefunction.conj())
+    eigenvalues = torch.linalg.eigvalsh(density_matrix)
+    entropy = -torch.sum(eigenvalues * torch.log(eigenvalues + 1e-12))
+    return entropy
+
+✅ Purpose:
+
+Calculates the entanglement entropy of a quantum wavefunction, a key measure of quantum information and coherence.
+
+🧮 Steps:
+
+1. Density Matrix:
+
+
+
+\rho = |\psi\rangle \langle \psi|
+
+2. Eigenvalues: Compute eigenvalues of the Hermitian density matrix using eigvalsh.
+
+
+3. Von Neumann Entropy:
+
+
+
+S = -\sum_i \lambda_i \log(\lambda_i)
+
+📤 Output:
+
+A scalar tensor representing the entropy , indicating the level of quantum entanglement.
+
+
+
+---
+
+🧠 Function: betti_numbers(wavefunction)
+
+def betti_numbers(wavefunction):
+    """Compute topological features using persistent homology"""
+    prob_dist = wavefunction.abs().square().cpu().numpy()
+    # Create point cloud from probability distribution
+    rips = RipsComplex(points=prob_dist)
+    st = rips.create_simplex_tree(max_dimension=2)
+    st.compute_persistence()
+    betti = st.betti_numbers()
+    return betti[:3]  # Return first three Betti numbers
+
+✅ Purpose:
+
+Computes the Betti numbers (topological features) from the wavefunction via persistent homology.
+
+🧮 Steps:
+
+1. Convert to Point Cloud:
+
+Compute probability distribution  → real, non-negative.
+
+Convert to NumPy and treat values as coordinates in a high-dimensional space.
+
+
+
+2. Rips Complex Construction:
+
+Uses gudhi.RipsComplex to build simplicial complexes from point distances.
+
+
+
+3. Persistence Computation:
+
+Extracts features like connected components, loops, voids (homology classes).
+
+
+
+4. Return Betti Numbers:
+
+: number of connected components
+
+: number of 1D holes (loops)
+
+: number of 2D holes (voids)
+
+
+
+
+📤 Output:
+
+A list of the first three Betti numbers: [β0, β1, β2]
+
+
+
+---
+
+📊 Summary Table
+
+Metric	Function	Meaning / Use
+
+Entanglement Entropy	entanglement_entropy()	Measures quantum coherence or mixedness
+Betti Numbers	betti_numbers()	Topological features: connectivity, holes, voids
+
+
+
+---
+
+📈 Use Cases in Training
+
+These metrics are typically used during validation (e.g., in trainer.py) to:
+
+Track quantum information quality (entropy)
+
+Analyze topological complexity of evolved quantum states (Betti)
+
+
+
+---
+
+✅ Dependencies
+
+Ensure gudhi is installed:
+
+pip install gudhi
+
+
+---
+
+🧪 Example Usage
+
+wf = torch.randn(1024, dtype=torch.cfloat)
+entropy = entanglement_entropy(wf)
+betti = betti_numbers(wf)
+print("Entropy:", entropy.item())
+print("Betti:", betti)
+
+
+Here's a complete and structured explanation of the callbacks.py module in the pytron_qft/training directory.
+
+
+---
+
+📄 File: callbacks.py
+
+Location: pytron_qft/training/callbacks.py
+Purpose: This module defines callback classes used during training to apply additional functionality such as renormalization group flows and topological feature logging.
+
+
+---
+
+🔧 Class: RGFlowCallback
+
+class RGFlowCallback:
+    """Renormalization Group Flow Callback"""
+    def __init__(self, model, frequency=100):
+        self.model = model
+        self.frequency = frequency
+        self.step_count = 0
+        
+    def on_batch_end(self):
+        self.step_count += 1
+        if self.step_count % self.frequency == 0:
+            self.model.apply_renormalization()
+
+✅ Purpose:
+
+Applies renormalization to the model periodically during training. This simulates a renormalization group (RG) flow, a key idea in quantum field theory to remove irrelevant high-frequency components and stabilize learning.
+
+🧮 Functionality:
+
+frequency: Determines how often (in batches) the renormalization is applied.
+
+on_batch_end(): Increments the step count and applies renormalization if the frequency condition is met.
+
+
+📌 Model Requirement:
+
+The model must have a method called apply_renormalization() defined, which executes the actual renormalization logic (e.g., suppressing noise or high-frequency modes).
+
+
+---
+
+🔧 Class: TopologyLogger
+
+class TopologyLogger:
+    """Log topological features during training"""
+    def __init__(self, log_path):
+        self.log_path = log_path
+        self.betti_history = []
+        
+    def on_epoch_end(self, betti_numbers):
+        self.betti_history.append(betti_numbers)
+        torch.save(self.betti_history, self.log_path)
+
+✅ Purpose:
+
+Records the evolution of topological features (e.g., Betti numbers) across epochs for interpretability and analysis of quantum representations.
+
+🧮 Functionality:
+
+log_path: File path to store topological history (.pt format using torch.save).
+
+on_epoch_end(betti_numbers): Appends current Betti numbers to history and saves the entire log to disk.
+
+
+📌 Integration Point:
+
+Used after each validation epoch where betti_numbers are computed (see trainer.py for example).
+
+
+---
+
+💡 Example Integration in Training
+
+from pytron_qft.training.callbacks import RGFlowCallback, TopologyLogger
+
+model = MyQuantumModel()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+device = torch.device("cuda")
+
+rg_callback = RGFlowCallback(model, frequency=50)
+topo_logger = TopologyLogger(log_path="betti_log.pt")
+
+trainer = QFTrainer(model, optimizer, device, callbacks=[rg_callback])
+...
+for epoch in range(epochs):
+    trainer.train_epoch(train_loader)
+    val_loss, acc, entropy, betti = trainer.validate(test_loader)
+    topo_logger.on_epoch_end(betti)
+
+
+---
+
+🧾 Summary Table
+
+Callback Class	Method	Purpose
+
+RGFlowCallback	on_batch_end()	Periodically apply renormalization to the model
+TopologyLogger	on_epoch_end()	Save Betti number history to track topological flow
+
+
+
+---
+
+🔋 Dependencies
+
+torch (for saving with torch.save)
+
+No external dependencies required beyond PyTorch
+
+
+
+---
+
+✅ Conclusion
+
+This module adds modular extensibility to the training loop:
+
+RGFlowCallback simulates quantum renormalization.
+
+TopologyLogger provides a scientific trace of topological evolution.
+
+
+These are especially useful in quantum machine learning contexts where interpretability and stability of training are critical.
+
+Here is a complete and structured explanation of the wavefunction_plot.py module in the pytron_qft/visualization directory.
+
+
+---
+
+📄 File: wavefunction_plot.py
+
+Location: pytron_qft/visualization/wavefunction_plot.py
+Purpose: Provides a utility function for visualizing the magnitude and phase of a quantum wavefunction.
+
+
+---
+
+🧠 Background
+
+A wavefunction  in quantum mechanics is typically a complex-valued vector representing the quantum state of a system. Visualizing its properties is essential for understanding quantum dynamics:
+
+Magnitude () gives the probability amplitude.
+
+Phase () carries interference and coherence information.
+
+
+
+---
+
+🔧 Function: plot_wavefunction
+
+def plot_wavefunction(psi, title="Wavefunction Visualization", ax=None):
+    """Visualize wavefunction magnitude and phase"""
+    if ax is None:
+        fig, ax = plt.subplots(1, 2, figsize=(12, 4))
+    
+    magnitude = np.abs(psi)
+    phase = np.angle(psi)
+    
+    # Magnitude plot
+    ax[0].plot(magnitude)
+    ax[0].set_title(f"{title} - Magnitude")
+    ax[0].set_xlabel("State Index")
+    ax[0].set_ylabel("|ψ|")
+    
+    # Phase plot
+    ax[1].plot(phase)
+    ax[1].set_title(f"{title} - Phase")
+    ax[1].set_xlabel("State Index")
+    ax[1].set_ylabel("Phase (radians)")
+    ax[1].set_ylim(-np.pi, np.pi)
+    
+    return ax
+
+
+---
+
+✅ Purpose
+
+To plot both the magnitude and phase of a wavefunction array side by side.
+
+Useful for debugging or interpreting model outputs in quantum field learning.
+
+
+
+---
+
+🧮 Parameters
+
+Parameter	Type	Description
+
+psi	numpy.ndarray	A 1D complex array representing the wavefunction
+title	str	Plot title prefix (default: "Wavefunction Visualization")
+ax	matplotlib.axes.Axes or None	Optional; axes to plot on (for subplot use)
+
+
+
+---
+
+📊 Behavior
+
+If no axes are provided, a new figure with 2 subplots is created.
+
+The function:
+
+Computes magnitude using np.abs(psi)
+
+Computes phase using np.angle(psi)
+
+
+Plots:
+
+Left plot: Magnitude vs. index
+
+Right plot: Phase vs. index (clamped between  and )
+
+
+
+
+---
+
+🖼️ Example Usage
+
+import numpy as np
+from pytron_qft.visualization.wavefunction_plot import plot_wavefunction
+
+# Create a mock wavefunction
+psi = np.exp(1j * np.linspace(0, 4 * np.pi, 100))  # Spiral phase
+
+plot_wavefunction(psi, title="Sample Wavefunction")
+plt.show()
+
+
+---
+
+🔋 Dependencies
+
+matplotlib.pyplot for plotting
+
+numpy for numerical operations on complex arrays
+
+
+
+---
+
+🧾 Summary Table
+
+Feature	Description
+
+📐 Magnitude Plot	Shows 
+📈 Phase Plot	Shows  clamped to 
+⚙️ Axes Reuse	Can embed in other matplotlib figure/subplot workflows
+🎯 Use Case	Visualizing learned quantum representations or outputs
+
+
+
+---
+
+✅ Conclusion
+
+The plot_wavefunction function provides a simple, reusable utility for visualizing quantum state representations in terms of:
+
+Amplitude (probability)
+
+Phase (quantum coherence)
+
+
+It’s especially useful when interpreting complex-valued outputs from quantum neural networks or field models.
+
+Here is a comprehensive explanation of the homology_tracker.py module in the pytron_qft/visualization directory.
+
+
+---
+
+📄 File: homology_tracker.py
+
+Location: pytron_qft/visualization/homology_tracker.py
+Purpose: To compute and visualize the persistent homology of a wavefunction using topological data analysis (TDA) tools.
+
+
+---
+
+🧠 Background
+
+Persistent Homology is a tool in Topological Data Analysis (TDA) that captures the multi-scale topological features (like connected components, loops, voids) of a space. In the context of quantum physics:
+
+A wavefunction can be interpreted as a probability distribution.
+
+We can convert this distribution into a point cloud, and analyze its topological structure via Rips Complexes.
+
+Persistence diagrams show when these features appear ("birth") and disappear ("death") at different thresholds.
+
+
+This can give insights into the complexity and stability of quantum states.
+
+
+---
+
+🔧 Function: track_homology
+
+def track_homology(wavefunction, max_dim=2):
+    """Compute and visualize persistent homology"""
+    # Convert wavefunction to point cloud
+    probs = wavefunction.abs().square().numpy()
+    point_cloud = np.vstack([np.arange(len(probs)), probs]).T
+    
+    # Compute persistent homology
+    rips = RipsComplex(points=point_cloud)
+    st = rips.create_simplex_tree(max_dimension=max_dim)
+    diag = st.persistence()
+    
+    # Plot persistence diagram
+    plt.figure(figsize=(8, 6))
+    plot_persistence_diagram(diag)
+    plt.title("Persistence Diagram")
+    plt.tight_layout()
+    
+    return diag
+
+
+---
+
+✅ Purpose
+
+Computes persistent homology of a wavefunction treated as a 2D point cloud.
+
+Plots a persistence diagram to visualize the topological features.
+
+
+
+---
+
+🧮 Parameters
+
+Parameter	Type	Description
+
+wavefunction	torch.Tensor	Complex-valued tensor representing the quantum state
+max_dim	int (default=2)	Maximum dimension of homology (0: components, 1: loops, 2: voids)
+
+
+
+---
+
+🧪 Computation Steps
+
+1. Extract probability amplitudes from the wavefunction:
+
+probs = wavefunction.abs().square().numpy()
+
+This gives a real-valued 1D array corresponding to probability densities.
+
+
+2. Create a 2D point cloud:
+
+point_cloud = np.vstack([np.arange(len(probs)), probs]).T
+
+X-axis: index
+Y-axis: probability amplitude
+
+
+3. Build Rips Complex:
+
+rips = RipsComplex(points=point_cloud)
+st = rips.create_simplex_tree(max_dimension=max_dim)
+diag = st.persistence()
+
+
+4. Visualize Persistence Diagram:
+
+plot_persistence_diagram(diag)
+
+
+
+
+---
+
+📈 Output
+
+Returns: The persistence diagram (as list of tuples with birth and death times of topological features).
+
+Displays: A matplotlib plot of the persistence diagram (points representing features in homological dimensions 0, 1, etc.)
+
+
+
+---
+
+📊 Example Usage
+
+import torch
+from pytron_qft.visualization.homology_tracker import track_homology
+
+# Create a simple complex wavefunction
+psi = torch.exp(1j * torch.linspace(0, 2 * torch.pi, 100)) * torch.linspace(0, 1, 100)
+
+# Track homology
+diag = track_homology(psi)
+
+
+---
+
+📦 Dependencies
+
+Library	Usage
+
+torch	To manipulate wavefunctions
+numpy	Convert tensors to arrays
+matplotlib	To plot persistence diagrams
+gudhi	To compute persistent homology
+
+
+> 📝 gudhi is a powerful library for computational topology and persistent homology.
+
+
+
+
+---
+
+🧾 Summary Table
+
+Feature	Description
+
+✅ Homology Tracking	Captures topological features of wavefunctions
+📊 Persistence Diagram	Visualizes birth-death of topological features
+🔍 2D Point Cloud Conversion	Converts 1D probability vector into 2D topological point cloud
+🧠 Insight Tool	Helps analyze structure and complexity of quantum states
+
+
+
+---
+
+✅ Conclusion
+
+The track_homology function gives a powerful bridge between quantum physics and topological data analysis, allowing researchers to explore how the shape of a wavefunction evolves.
+
+This can be especially useful in:
+
+Understanding entanglement patterns
+
+Analyzing complex field dynamics
+
+Quantifying structural transitions in quantum states
+
+
